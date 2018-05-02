@@ -1,15 +1,18 @@
 #!/home/sci/ricbl/Documents/virtualenvs/dgx_python2_pytorch0.1/bin/python
 #SBATCH --time=0-30:00:00 # walltime, abbreviated by -t
 #SBATCH --nodes=1 # number of cluster nodes, abbreviated by -N
+#SBATCH --mincpus=8
 #SBATCH --gres=gpu:1
 #SBATCH -o dgx_log/slurm-%j.out-%N # name of the stdout, using the job number (%j) and the first node (%N)
 #SBATCH -e dgx_log/slurm-%j.err-%N # name of the stderr, using the job number (%j) and the first node (%N)
-
-# encoding: utf-8
+#SBATCH --mem=70G
 
 """
 The main CheXNet model implementation.
 """
+import torch
+#import torch.multiprocessing as mp
+#mp.set_start_method('spawn')
 import sys
 import os
 import time
@@ -18,10 +21,10 @@ sys.path.append(os.getcwd())
 #os.environ['CUDA_VISIBLE_DEVICES'] = "1"
 import logging
 timestamp = time.strftime("%Y%m%d-%H%M%S")
-logging.basicConfig(stream=sys.stdout, filename = 'log/log'+timestamp+'.txt', level=logging.INFO)
+logging.basicConfig( filename = 'log/log'+timestamp+'.txt', level=logging.INFO)
+print('log'+timestamp+'.txt')
 import numpy as np
-
-import torch
+np.set_printoptions(threshold=np.inf)
 from torch.nn.modules import Module
 import torch.nn.functional as F
 import torch.nn as nn
@@ -38,8 +41,13 @@ from torch.utils.data import Dataset
 from random import *
 import pandas as pd
 from PIL import Image
+from PIL import ImageMath
 from future.utils import raise_with_traceback
 from future.utils import iteritems
+from h5df import Store
+import socket 
+
+import h5py
 
 try:
     import cPickle as pickle
@@ -48,7 +56,6 @@ except:
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-import gc
 from torch.optim import Optimizer
 from functools import partial
 
@@ -58,27 +65,47 @@ percentage_labels = ['fev1fvc_pred','fev1fvc_predrug','fvc_ratio','fev1_ratio','
 
 configs = {}
 
-configs['labels_to_use'] = 'three_absolute' # 'two_ratios', 'three_absolute' or 'all_nine'
+NUM_WORKERS = 1
+
+#configs from this block should probably be the same regardless of model and machine
 configs['one_vs_all'] = False
 configs['use_set_29'] = False
 configs['use_log_transformation'] = False
 configs['CKPT_PATH'] = 'model.pth.tar'
-configs['load_image_features_from_file'] = True
 configs['output_image_name'] = 'resultsmse' + timestamp + '.png'
-configs['BATCH_SIZE'] = 128
 configs['N_EPOCHS'] = 50
-configs['l2_reg'] = 0.05
-configs['model_to_use'] = 'densenet' #'linear' 'fc_one_hidden' 'conv11' or 'densenet'
-configs['remove_pre_avg_pool'] = False
+configs['use_lr_scheduler'] = True
+configs['kind_of_loss'] = 'l2' #'l1' or 'l2' or 'smoothl1'
 configs['positions_to_use'] = ['PA']
-configs['initial_lr'] = 0.0001
-configs['use_lr_scheduler'] = False
+configs['initial_lr'] = 0.00001
+configs['load_image_features_from_file'] = True
 
-assert((not configs['model_to_use']=='densenet') or (not configs['remove_pre_avg_pool']) )
+#These are the main configs to change from default
+configs['trainable_densenet'] = True
+configs['use_conv11'] = False
+configs['labels_to_use'] = 'only_absolute' # 'two_ratios', 'three_absolute', 'all_nine' or 'only_absolute'
+
+# configuration of architecture of end of model
+configs['n_hidden_layers'] = 2
+configs['channels_hidden_layers'] = 2048 # only used if configs['n_hidden_layers']>0
+configs['use_dropout_hidden_layers'] = 0.25#0  # 0 turn off dropout # only used if configs['n_hidden_layers']>0
+configs['conv11_channels'] = 128 # only used if configs['use_conv11']
+
+# these configs are modified depending on model and machine
+configs['machine_to_use'] = 'dgx' if socket.gethostname() == 'rigveda' else 'other'
+configs['remove_pre_avg_pool'] = False if configs['trainable_densenet'] else True
+configs['BATCH_SIZE'] = 64 if (configs['machine_to_use']=='dgx' and configs['trainable_densenet']) else (16 if (configs['trainable_densenet']) else (128))
+configs['l2_reg'] = 0#.05 # 0 if configs['trainable_densenet'] else 0.05 #0.0005
 
 def important_ratios_plot_calc(values, k):
     return values[:,0]/values[:,k+1] 
 
+def absolutes_and_important_ratios_plot_calc(values, k):
+    if k<4:
+        return common_plot_calc(values, k)
+    else:
+        return important_ratios_plot_calc(values, k-4)
+  
 def common_plot_calc(values, k):
     return values[:,k]
 
@@ -94,41 +121,78 @@ elif configs['labels_to_use']=='all_nine':
     labels_columns = ['fvc_pred','fev1_pred','fev1fvc_pred','fvc_predrug','fev1_predrug','fev1fvc_predrug','fvc_ratio','fev1_ratio','fev1fvc_ratio']
     plot_columns = labels_columns
     plot_function = common_plot_calc
+elif configs['labels_to_use']=='only_absolute':
+    labels_columns = ['fev1_predrug','fvc_predrug', 'fev1_pred', 'fvc_pred']
+    plot_columns = ['fev1_predrug','fvc_predrug', 'fev1_pred', 'fvc_pred', 'fev1fvc_predrug','fev1_ratio']
+    plot_function = absolutes_and_important_ratios_plot_calc
 else:
     raise_with_traceback(ValueError('configs["labels_to_use"] was set to an invalid value: ' + configs['labels_to_use']))
 
 def get_name_pickle_file():
-    extra = ''
-    if configs['model_to_use']=='densenet':
+    if configs['trainable_densenet']:
         size_all_images = '224_224'
     elif configs['remove_pre_avg_pool']:
         size_all_images = '7_7'
-        if not configs['model_to_use']=='conv11':
-            extra = '_flatten'
     else:
         size_all_images = '1_1'
-    return 'all_images_' +  size_all_images + extra + '_prot2.pkl'
+    return 'all_images_' +  size_all_images + '_prot2.pkl'
 
 class DatasetGenerator(Dataset):
-    
-    #-------------------------------------------------------------------------------- 
-    
-    def __init__ (self, pathDatasetFile):
-    
+    def __init__ (self, pathDatasetFile, transform = None):
+        super(DatasetGenerator, self).__init__()
         self.listImage = pathDatasetFile
+        
+        if configs['trainable_densenet'] and configs['load_image_features_from_file']:
+            self.file = h5py.File('./all_images_224_224_prot2.2.h5', 'r')
+            
+            #much slower
+            #store = Store('all_images_224_224_prot2.2.h5df', mode="r")
+            #self.df1 = store["/frames/1"]
+        else: 
+            self.n_images = len(self.listImage)
+        self.n_images = len(self.listImage)
+        self.transform = transform
     
     #-------------------------------------------------------------------------------- 
     
     def __getitem__(self, index):
-        
-        imageData = self.listImage['preprocessed'].iloc[index][0]
-        imageLabel= torch.FloatTensor(self.listImage[labels_columns].iloc[index])        
+        if (configs['trainable_densenet'] and (not configs['load_image_features_from_file'])):
+            imagePath = self.listImage['filepath'].iloc[index]
+            imageData = Image.open(imagePath)
+            
+        else:
+            if configs['trainable_densenet']:
+                old_index = self.listImage['preprocessed'].iloc[index]
+                
+                imageData = self.file['dataset_1'][old_index,...].astype('float32')
+                
+                #much slower
+                #examples_to_read = ['ind' + str(old_index)]
+                #imageData = self.df1.rows(examples_to_read).values.reshape(3,224,224)
+            else:
+                imageData = self.listImage['preprocessed'].iloc[index][0]
+        #a = self.listImage[labels_columns]
+        #print(index)
+        #print(len(a))
+        #print(self.listImage['filepath'].iloc[index])
+        #imageData = np.flip(imageData,1)
+        #b = np.transpose((imageData), axes = (1,2,0))*[[[0.229, 0.224, 0.225]]]+[[[0.485, 0.456, 0.406]]] 
+        #b = b - [[[np.amin(b)]]]
+        #print(np.amax(b))
+        #print(np.amin(b))
+        #plt.imshow(b)
+        #plt.savefig('test.png')
+        #1/0
+        imageLabel= torch.FloatTensor(self.listImage[labels_columns].iloc[index])
+        #self.transform = transforms.ToTensor()
+        if self.transform is not None: 
+            imageData = self.transform(imageData)
         return imageData, imageLabel
         
     #-------------------------------------------------------------------------------- 
     
     def __len__(self):
-        return len(self.listImage)
+        return self.n_images
     
  #-------------------------------------------------------------------------------- 
  
@@ -137,9 +201,8 @@ def write_filenames():
     pathPngs = '/usr/sci/projects/DeepLearning/Tolga_Lab/Projects/Project_JoyceSchroeder/data/data_PFT/'
     command = 'find ' + pathPngs + ' -type f -name "*.png" > ' + pathFileTrain
     os.system(command)
-    
-def read_filenames(pathFileTrain):
 
+def read_filenames(pathFileTrain):
     listImage = []
     fileDescriptor = open(pathFileTrain, "r")
     
@@ -181,7 +244,6 @@ def read_filenames(pathFileTrain):
           listImage.append(thisimage)
     fileDescriptor.close()
     return pd.DataFrame(listImage)
-
 
 class ReduceLROnPlateau(object):
     """Reduce learning rate when a metric has stopped improving.
@@ -276,7 +338,7 @@ class ReduceLROnPlateau(object):
             epoch = self.last_epoch = self.last_epoch + 1
         self.last_epoch = epoch
 
-        if self.is_better(current, self.best).cpu().numpy():
+        if self.is_better(current, self.best):
             self.best = current
             self.num_bad_epochs = 0
         else:
@@ -298,7 +360,7 @@ class ReduceLROnPlateau(object):
             if old_lr - new_lr > self.eps:
                 param_group['lr'] = new_lr
                 if self.verbose:
-                    print('Epoch {:5d}: reducing learning rate'
+                    logging.info('Epoch {:5d}: reducing learning rate'
                           ' of group {} to {:.4e}.'.format(epoch, i, new_lr))
 
     @property
@@ -382,9 +444,9 @@ def run_epoch(loader, model, criterion, optimizer, epoch=0, n_epochs=0, train=Tr
     end = time.time()
     lossMean = 0.0 
     lossValNorm = 0.0
-    logging.info('oi3')
+    y_corr = np.empty([0,len(labels_columns)])
+    y_pred = np.empty([0,len(labels_columns)])
     for i, (input, target) in enumerate(loader):
-        logging.info('oi4')
         if train:
             optimizer.zero_grad()
 
@@ -394,11 +456,9 @@ def run_epoch(loader, model, criterion, optimizer, epoch=0, n_epochs=0, train=Tr
 
         input_var = torch.autograd.Variable(input, volatile=(not train))
         target_var = torch.autograd.Variable(target, volatile=(not train))
-        logging.info('oi5')
-        print(input.size())
-        print(input_var.size())
+        #logging.info(input.size())
+        #logging.info(input_var.size())
         output_var = model(input_var)
-        logging.info('oi6')
         loss = criterion(output_var, target_var)
         if train:
             train_string = 'train'
@@ -412,14 +472,22 @@ def run_epoch(loader, model, criterion, optimizer, epoch=0, n_epochs=0, train=Tr
                 else:
                     output_var_fixed = output_var.data.cpu().numpy()
                     target_var_fixed = target_var.data.cpu().numpy()
+                    
+                y_corr = np.concatenate((y_corr, target_var_fixed), axis = 0)
+                y_pred = np.concatenate((y_pred, output_var_fixed), axis = 0)
+                    
                 #logging.info(output_var_fixed)
                 #logging.info(target_var_fixed)
                 #print(output_var.data.cpu().numpy())
                 #print(target_var.data.cpu().numpy())
                 #logging.info(output_var_fixed.shape)
                 #logging.info(target_var_fixed.shape)
+                
+                
+                
                 markers = ['b.','g.', 'r.', 'c.', 'm.', 'y.', 'k.', 'b>', 'g>','r>']
                 plot_var_for_legend = []
+                
                 for k in range(len(plot_columns)):
                     this_plot, = plt.plot(plot_function(target_var_fixed, k),plot_function(output_var_fixed, k), markers[k])
                     plot_var_for_legend.append(this_plot)
@@ -450,7 +518,8 @@ def run_epoch(loader, model, criterion, optimizer, epoch=0, n_epochs=0, train=Tr
         loss_meter.update(loss)
         if not train:
             pass
-        lossMean += len(input)*loss 
+        lossMean += len(input)*loss.data.cpu().numpy()
+        #lossMean += len(input)*loss.data[0]
         lossValNorm += len(input)
         '''
         error_meter.update(error)
@@ -463,6 +532,11 @@ def run_epoch(loader, model, criterion, optimizer, epoch=0, n_epochs=0, train=Tr
         ]))
         '''
     if epoch==n_epochs:
+        r2s = {}
+        for k in range(len(plot_columns)):
+            r2s[plot_columns[k]] = r2(y_corr = plot_function(y_corr,k), y_pred = plot_function(y_pred,k))
+        logging.info('r2: ' + str(r2s))
+        
         ax = plt.gca()
         ylim = ax.get_ylim()
         xlim = ax.get_xlim()
@@ -504,11 +578,42 @@ class Convert16BitToFloat(object):
 
     def __call__(self, tensor):
         tensor.mode = 'I'
+        return ImageMath.eval('im/256', {'im':tensor}).convert('RGB')
         return tensor.point(lambda i:i*(1./256)).convert('RGB')
 
     def __repr__(self):
         return self.__class__.__name__ + '()'
 
+class RandomHorizontalFlipNumpy(object):    
+    def __init__(self, p = 0.5):
+        self.p = p
+
+    def __call__(self, tensor):
+        if random() < self.p:
+            #return np.flip(tensor, 2)
+            return tensor[:,:,::-1].copy()
+        return tensor
+
+    def __repr__(self):
+        return self.__class__.__name__ + '()'
+
+class RandomHorizontalFlipTensor(object):    
+    def __init__(self, p = 0.5):
+        self.p = p
+
+    def __call__(self, tensor):
+        if random() < self.p:
+            idx = [i for i in range(tensor.size(2)-1, -1, -1)]
+            
+            idx = torch.LongTensor(idx)
+            inverted_tensor = tensor.index_select(2, idx)
+
+            return inverted_tensor
+        return tensor
+
+    def __repr__(self):
+        return self.__class__.__name__ + '()'
+      
 class ChexnetEncode(object):    
     def __init__(self, model):
         self.model = model
@@ -516,10 +621,7 @@ class ChexnetEncode(object):
     def __call__(self, tensor):
         input_var = torch.autograd.Variable(tensor.view(1,3,224,224), volatile=True)
         out = self.model(input_var)
-        if configs['model_to_use'] in ['linear','fc_one_hidden']:
-            return [out.data.cpu().numpy().flatten()]
-        elif configs['model_to_use']=='conv11':
-            return [np.squeeze(np.transpose(out.data.cpu().numpy(), (0,1,2,3)),axis = 0)]
+        return [np.squeeze(np.transpose(out.data.cpu().numpy(), (0,1,2,3)),axis = 0)]
 
     def __repr__(self):
         return self.__class__.__name__ + '()'    
@@ -546,7 +648,7 @@ def sample(iterator, k):
     n = k - 1
     for item in iterator:
         n += 1
-        s = random.randint(0, n)
+        s = randint(0, n)
         if s < k:
             result[s] = item
 
@@ -558,6 +660,9 @@ def log_configs():
         logging.info(key + ': ' + str(value))
     logging.info('-----------------------------end used configs-----------------------------')
 
+def cmp(a, b):
+    return (a > b) - (a < b)
+  
 def compare_versions(version1, version2):
     def normalize(v):
         return [int(x) for x in re.sub(r'(\.0+)*$','', v).split(".")]
@@ -590,7 +695,55 @@ def load_pretrained_chexnet():
     chexnetModel = torch.nn.DataParallel(chexnetModel).cuda()
     chexnetModel = load_checkpoint(chexnetModel)
     return chexnetModel
-  
+    
+def r2(y_corr, y_pred):
+    y_corr_mean = np.mean(y_corr)
+    sstot = np.sum(np.square(y_corr-y_corr_mean))
+    ssres = np.sum(np.square(y_pred-y_corr))
+    return 1-ssres/sstot
+
+class Flatten(nn.Module):
+    def forward(self, input):
+        return input.view(input.size(0), -1)
+      
+def get_model(num_ftrs):
+    # initialize and load the model
+
+    model = torch.nn.Sequential()
+    current_n_channels = num_ftrs
+    if configs['use_conv11']:
+        model.add_module("flatten",nn.Conv2d( in_channels = 1024, out_channels =  configs['conv11_channels'], kernel_size = 1).cuda())
+        model.add_module("flatten",nn.ReLU().cuda())
+        current_n_channels = configs['conv11_channels']*(49 if configs['remove_pre_avg_pool'] else 1)
+    
+    model.add_module("flatten",Flatten().cuda())
+    if configs['n_hidden_layers'] > 0:
+        model.add_module("drop_0",nn.Dropout(p=configs['use_dropout_hidden_layers']).cuda())
+        #model.add_module("bn_0",torch.nn.BatchNorm1d(current_n_channels).cuda())
+        model.add_module("linear_0",nn.Linear(current_n_channels, configs['channels_hidden_layers'] ).cuda())
+        model.add_module("relu_0",nn.ReLU().cuda())
+        current_n_channels = configs['channels_hidden_layers']
+        for layer_i in range(1, configs['n_hidden_layers']): 
+            model.add_module("drop_"+str(layer_i),nn.Dropout(p=configs['use_dropout_hidden_layers']).cuda())
+            #model.add_module("bn_"+str(layer_i),torch.nn.BatchNorm1d(current_n_channels).cuda())
+            model.add_module("linear_"+str(layer_i),nn.Linear(current_n_channels, configs['channels_hidden_layers'] ).cuda())
+            model.add_module("relu_"+str(layer_i),nn.ReLU().cuda())
+            current_n_channels = configs['channels_hidden_layers']
+          
+    model.add_module("linear_out", nn.Linear(current_n_channels , len(labels_columns)).cuda())
+    if configs['trainable_densenet']:
+        outmodel = load_pretrained_chexnet()
+        
+        #for param in model.parameters():
+        #    param.requires_grad = False         
+        
+        outmodel.module.densenet121.classifier = model
+        
+        outmodel = outmodel.cuda()
+    else:
+        outmodel = model
+    return outmodel
+
 def main():
     cudnn.benchmark = False
     log_configs()
@@ -605,41 +758,38 @@ def main():
     
     num_ftrs = 50176
     if not configs['remove_pre_avg_pool']:
-        num_ftrs = num_ftrs/7/7
-            
-    if not configs['load_image_features_from_file']:
-
+        num_ftrs = int(num_ftrs/7/7)
+    
+    if (not configs['load_image_features_from_file']) or configs['trainable_densenet']:
         normalize = transforms.Normalize([0.485, 0.456, 0.406],
-                                        [0.229, 0.224, 0.225])
-        
+                                            [0.229, 0.224, 0.225])
         list_pretransforms =[     Convert16BitToFloat(),
-              CropBiggestCenteredInscribedSquare(),
-              transforms.Resize(size=(224)), 
-              transforms.RandomHorizontalFlip(),
-              transforms.ToTensor(),
-              normalize]
+                  CropBiggestCenteredInscribedSquare(),
+                  transforms.Resize(size=(224)), 
+                  transforms.RandomHorizontalFlip(),
+                  transforms.ToTensor(),
+                  normalize]
         
-        if not configs['model_to_use']=='densenet' :
-            chexnet = load_pretrained_chexnet()
-            num_ftrs = chexnetModel.module.densenet121.classifier[0].in_features*7*7
-            if not configs['remove_pre_avg_pool']:
-                num_ftrs = num_ftrs/7/7
-            
-            chexnetModel.module.densenet121.classifier = nn.Sequential()
-            chexnetModel = chexnetModel.cuda()  
-            list_pretransforms.append(ChexnetEncode(chexnetModel))
+        all_images = read_filenames('/home/sci/ricbl/Documents/projects/radiology-project/pft/' + file_with_image_filenames)
+       
+    if (not configs['trainable_densenet']) and (not configs['load_image_features_from_file']):
+        chexnetModel = load_pretrained_chexnet()
+        num_ftrs = chexnetModel.module.densenet121.classifier[0].in_features*7*7
+        if not configs['remove_pre_avg_pool']:
+            num_ftrs = int(num_ftrs/7/7)
+        
+        chexnetModel.module.densenet121.classifier = nn.Sequential()
+        chexnetModel = chexnetModel.cuda()  
+        list_pretransforms.append(ChexnetEncode(chexnetModel))
             
         transformSequence = transforms.Compose(list_pretransforms)
         
-
-        all_images = read_filenames('/home/sci/ricbl/Documents/projects/radiology-project/pft/' + file_with_image_filenames)
         all_images = preprocess_images(all_images, transformSequence)
         del transformSequence
-        if not configs['model_to_use']=='densenet':
-            del chexnetModel
+        del chexnetModel
         with open(get_name_pickle_file(), 'wb') as f:
             pickle.dump(all_images, f, protocol=2)
-    else:
+    elif (not configs['trainable_densenet']) and (configs['load_image_features_from_file']):
         all_images = pd.read_pickle(get_name_pickle_file())
 
     logging.info('ended feature loading. started label loading')
@@ -649,6 +799,8 @@ def main():
     all_labels[percentage_labels] = all_labels[percentage_labels] /100.
     if configs['use_log_transformation']:
         all_labels[labels_columns] = all_labels[labels_columns].apply(np.log)
+    if (configs['trainable_densenet'] and (configs['load_image_features_from_file'])):
+        all_images['preprocessed'] = all_images.index
     all_examples = pd.merge(all_images, all_labels, on=['subjectid', 'crstudy'])
     
     pa_images = all_examples[all_examples['position'].isin(configs['positions_to_use'])]
@@ -675,48 +827,45 @@ def main():
           
             subjectids = np.array(pa_images['subjectid'].unique())
             queue = np.random.permutation(subjectids.shape[0])
-            testids = pa_images['subjectid'][queue[:int(0.2*subjectids.shape[0])]]
-            test_images = pa_images.loc[pa_images['subjectid'].isin(testids)]  
+            testids = set(subjectids[queue[:int(0.2*subjectids.shape[0])]])
+            test_images = pa_images.loc[pa_images['subjectid'].isin(testids)]
             train_images = pa_images.loc[~pa_images['subjectid'].isin(testids)]  
-            
+        
+        if configs['trainable_densenet'] and (not configs['load_image_features_from_file']):
+            transformSequence = transforms.Compose(list_pretransforms)
+        elif configs['trainable_densenet']:
+            transformSequence = transforms.Compose([RandomHorizontalFlipNumpy()])
+        else: 
+            transformSequence = transforms.Compose([RandomHorizontalFlipTensor()])
         logging.info('size training: '+str(np.array(train_images).shape[0]))
         logging.info('size test: '+str(np.array(test_images).shape[0]))
-        train_dataset = DatasetGenerator(train_images)
+        
+        train_dataset = DatasetGenerator(train_images, transformSequence)
         
         train_indices = torch.randperm(len(train_dataset))  
         train_loader = DataLoader(dataset=train_dataset, batch_size=configs['BATCH_SIZE'],
-                                sampler=SubsetRandomSampler(train_indices), num_workers=8, pin_memory=True, drop_last = False)                          
+                                sampler=SubsetRandomSampler(train_indices), num_workers=NUM_WORKERS, pin_memory=True, drop_last = True)                          
         
-        test_dataset = DatasetGenerator(test_images)
+        test_dataset = DatasetGenerator(test_images, transformSequence)
         test_loader = DataLoader(dataset=test_dataset, batch_size=configs['BATCH_SIZE'],
-                                shuffle=False, num_workers=1, pin_memory=True)
+                                shuffle=False, num_workers=NUM_WORKERS, pin_memory=True)
         logging.info('finished loaders and generators. starting models')
         
-        
-        # initialize and load the model
-        if configs['model_to_use'] =='fc_one_hidden':
-            model =  nn.Sequential(nn.Linear(num_ftrs, 256).cuda(), nn.ReLU().cuda(), nn.Linear(256, len(labels_columns)).cuda())
-        elif configs['model_to_use'] =='conv11' :
-            model =  nn.Sequential(nn.Conv2d( in_channels = num_ftrs, out_channels =  len(labels_columns), kernel_size = 1).cuda(), nn.AvgPool2d( kernel_size=7, stride=1).cuda())
-        elif configs['model_to_use'] =='linear':
-            model =  nn.Sequential(nn.Linear(num_ftrs, len(labels_columns)).cuda())
-        elif configs['model_to_use'] =='densenet':
-            model = load_pretrained_chexnet()
-            
-            #for param in model.parameters():
-            #    param.requires_grad = False
-            
-            model.module.densenet121.classifier = nn.Sequential(
-                  nn.Linear(num_ftrs, len(labels_columns))
-              )
-            
-            model = model.cuda()
-        else:
-            raise_with_traceback(ValueError('configs["model_to_use"] was set to an invalid value: ' + configs["model_to_use"]))
+        model = get_model(num_ftrs)
         
         logging.info('finished models. starting criterion')
-        criterion = nn.MSELoss(size_average = True).cuda()
-        optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=configs['initial_lr'] , weight_decay=configs['l2_reg'])
+        
+        if configs['kind_of_loss'] == 'l1':
+            criterion = nn.L1Loss(size_average = True).cuda()
+        elif configs['kind_of_loss'] == 'l2':
+            criterion = nn.MSELoss(size_average = True).cuda()
+        elif configs['kind_of_loss'] == 'smoothl1':
+            nn.SmoothL1Loss(size_average = True).cuda()
+        else :
+            raise_with_traceback(ValueError('configs["kind_of_loss"] was set to an invalid value: ' + str(configs['kind_of_loss'])))
+              
+        #optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=configs['initial_lr'] , weight_decay=configs['l2_reg'])
+        optimizer = optim.Adam( model.parameters(), lr=configs['initial_lr'] , weight_decay=configs['l2_reg'])
         scheduler = ReduceLROnPlateau(optimizer, factor = 0.1, patience = 5, mode = 'min', verbose = True)
         models = models + [model]
         criterions = criterions + [criterion]
@@ -744,7 +893,6 @@ def main():
         
 
             #_set_lr(optimizer, epoch, n_epochs, lr)
-            logging.info('oi1')
             train_results = run_epoch(
                 loader=train_loader,
                 model=model,
@@ -754,8 +902,7 @@ def main():
                 n_epochs=n_epochs,
                 train=True,
             ) 
-            logging.info('oi12')
-            loss = np.atleast_1d( train_results[3].data.cpu().numpy())
+            loss = np.atleast_1d( train_results[3])
             all_train_losses = np.concatenate((all_train_losses, loss), axis=0)
             val_results = run_epoch(loader=test_loader,
                 model=model,
@@ -764,12 +911,12 @@ def main():
                 epoch=epoch,
                 n_epochs=n_epochs,
                 train=False)
-            loss = np.atleast_1d( val_results[3].data.cpu().numpy())
+            loss = np.atleast_1d( val_results[3])
             if configs['use_lr_scheduler']:
                 schedulers[i].step(loss)
             all_val_losses = np.concatenate((all_val_losses, loss), axis=0)
-        logging.info('Train loss ' + str(epoch) + '/' + str(n_epochs) + ': ' +str(np.sum(all_train_losses)))
-        logging.info('Val loss ' + str(epoch) + '/' + str(n_epochs) + ': '+str(np.sum(all_val_losses)))
+        logging.info('Train loss ' + str(epoch) + '/' + str(n_epochs) + ': ' +str(np.average(all_train_losses)))
+        logging.info('Val loss ' + str(epoch) + '/' + str(n_epochs) + ': '+str(np.average(all_val_losses)))
 
 class DenseNet121(nn.Module):
     """Model modified.
@@ -788,7 +935,7 @@ class DenseNet121(nn.Module):
         
         self.densenet121.load_state_dict(model_zoo.load_url(model_urls['densenet121']))
         '''
-        self.densenet121 = torchvision.models.densenet121(pretrained=True)
+        self.densenet121 = torchvision.models.densenet121(pretrained=False)
         
         num_ftrs = self.densenet121.classifier.in_features
         
@@ -800,6 +947,8 @@ class DenseNet121(nn.Module):
     def forward(self, x):
         if configs['remove_pre_avg_pool']:
             x = self.densenet121.features(x)
+            x = F.relu(x, inplace=True) # should I always have this relu on?
+            x = self.densenet121.classifier(x)
         else:
             x = self.densenet121(x)
         return x   
