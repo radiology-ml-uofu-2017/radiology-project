@@ -13,7 +13,7 @@ import os
 import time
 
 sys.path.append(os.getcwd())
-#os.environ['CUDA_VISIBLE_DEVICES'] = "1"
+os.environ['CUDA_VISIBLE_DEVICES'] = "3"
 import logging
 timestamp = time.strftime("%Y%m%d-%H%M%S")
 logging.basicConfig( filename = 'log/log'+timestamp+'.txt', level=logging.INFO)
@@ -33,7 +33,7 @@ from torch.utils.data import DataLoader
 import model_loading
 import utils
 from configs import configs
-import outputs
+import metrics
 import inputs
 
 logging.info('Using PyTorch ' +str(torch.__version__))
@@ -42,7 +42,7 @@ NUM_WORKERS = 1
 # faster to have one worker and use non thread safe h5py to load preprocessed images
 # than other tested options
 
-labels_columns = configs.get_enum_return('get_labels_columns')
+labels_columns = configs['get_labels_columns']
 configs.load_predefined_set_of_configs('densenet') #'densenet', 'frozen_densenet'
 
 def run_epoch(loader, model, criterion, optimizer, epoch=0, n_epochs=0, train=True, ranges_labels = None):
@@ -107,9 +107,9 @@ def run_epoch(loader, model, criterion, optimizer, epoch=0, n_epochs=0, train=Tr
     return time_meter.value(), loss_meter.value(), np.atleast_1d(lossMean/lossValNorm), y_corr, y_pred
 
 def sigmoid_denormalization(np_array, ranges_labels):
-    for i in np_array.shape[0]:
+    for i in range(np_array.shape[1]):
         col_name = labels_columns[i]
-        np_array[i,:] =  np_array[i,:]*ranges_labels[col_name][1]*safety_constant[col_name][1]+ranges_labels[col_name][0]*safety_constant[col_name][0]
+        np_array[i,:] =  np_array[i,:]*ranges_labels[col_name][1]*configs['sigmoid_safety_constant'][col_name][1]+ranges_labels[col_name][0]*configs['sigmoid_safety_constant'][col_name][0]
     return np_array
 
 def count_unique_images_and_pairs(images_to_use, all_examples):
@@ -134,12 +134,12 @@ def load_training_pipeline(images_to_use, transformSequence, num_ftrs):
     train_loaders = []
     test_loaders = []
     
-    configs.add_enum_return('training_pipeline', 'one_vs_all','get_training_range', lambda: images_to_use['subjectid'].unique())
-    configs.add_enum_return('training_pipeline', 'simple','get_training_range', lambda: range(1))
-    configs.add_enum_return('training_pipeline', 'ensemble','get_training_range', lambda: range(configs['total_ensemble_models']))
+    configs.add_self_referenced_variable_from_dict('get_training_range', 'training_pipeline', 
+                                          {'one_vs_all':images_to_use['subjectid'].unique(),
+                                           'simple': range(1),
+                                           'ensemble': range(configs['total_ensemble_models'])})
 
-
-    training_range = configs.get_enum_return('get_training_range')
+    training_range = configs['get_training_range']
     
     for i in training_range:
         if configs['training_pipeline']=='one_vs_all':
@@ -176,7 +176,7 @@ def load_training_pipeline(images_to_use, transformSequence, num_ftrs):
         
         logging.info('finished models. starting criterion')
         
-        criterion = configs.get_enum_return('get_loss')
+        criterion = configs['loss_function']
 
         optimizer = optim.Adam( model.parameters(), lr=configs['initial_lr'] , weight_decay=configs['l2_reg'])
         scheduler = utils.ReduceLROnPlateau(optimizer, factor = 0.1, patience = 5, mode = 'min', verbose = True)
@@ -192,8 +192,13 @@ def train(models, criterions, optimizers, schedulers, train_loaders, test_loader
     n_epochs = configs['N_EPOCHS']
     logging.info('starting training')
     
-    training_range = configs.get_enum_return('get_training_range')
-  
+    training_range = configs['get_training_range']
+    
+    ys_corr_train = np.empty([np.sum([len(x[0]) for x in train_loaders[0]]),len(labels_columns),0])
+    ys_pred_train = np.empty([np.sum([len(x[0]) for x in train_loaders[0]]),len(labels_columns),0])
+    ys_corr_test = np.empty([np.sum([len(x[0]) for x in test_loaders[0]]),len(labels_columns),0])
+    ys_pred_test = np.empty([np.sum([len(x[0]) for x in test_loaders[0]]),len(labels_columns),0])
+    
     for epoch in range(1, n_epochs + 1):    
 
         all_val_losses =np.array([])
@@ -237,15 +242,15 @@ def train(models, criterions, optimizers, schedulers, train_loaders, test_loader
                 ys_corr_test = y_corr_test
                 ys_pred_test = y_pred_test
             elif configs['training_pipeline']=='one_vs_all':
-                ys_corr_train = np.concatenate((ys_corr_train, y_corr_train), axis = 0)
-                ys_pred_train = np.concatenate((ys_pred_train, y_pred_train), axis = 0)
-                ys_corr_test = np.concatenate((ys_corr_test, y_corr_test), axis = 0)
-                ys_pred_test = np.concatenate((ys_pred_test, y_pred_test), axis = 0)
+                ys_corr_train = np.concatenate((ys_corr_train, np.expand_dims(y_corr_train, axis = 2)), axis = 0)
+                ys_pred_train = np.concatenate((ys_pred_train, np.expand_dims(y_pred_train, axis = 2)), axis = 0)
+                ys_corr_test = np.concatenate((ys_corr_test, np.expand_dims(y_corr_test, axis = 2)), axis = 0)
+                ys_pred_test = np.concatenate((ys_pred_test, np.expand_dims(y_pred_test, axis = 2)), axis = 0)
             elif configs['training_pipeline']=='ensemble':
-                ys_corr_train = np.concatenate((ys_corr_train, y_corr_train), axis = 1)
-                ys_pred_train = np.concatenate((ys_pred_train, y_pred_train), axis = 1)
-                ys_corr_test = np.concatenate((ys_corr_test, y_corr_test), axis = 1)
-                ys_pred_test = np.concatenate((ys_pred_test, y_pred_test), axis = 1)
+                ys_corr_train = np.concatenate((ys_corr_train, np.expand_dims(y_corr_train, axis = 2)), axis = 2)
+                ys_pred_train = np.concatenate((ys_pred_train, np.expand_dims(y_pred_train, axis = 2)), axis = 2)
+                ys_corr_test = np.concatenate((ys_corr_test, np.expand_dims(y_corr_test, axis = 2)), axis = 2)
+                ys_pred_test = np.concatenate((ys_pred_test, np.expand_dims(y_pred_test, axis = 2)), axis = 2)
                 
         if epoch==n_epochs:
             if configs['training_pipeline']=='ensemble':
@@ -254,9 +259,9 @@ def train(models, criterions, optimizers, schedulers, train_loaders, test_loader
                 ys_corr_test = np.mean(ys_corr_test, axis = 1)
                 ys_pred_test = np.mean(ys_pred_test, axis = 1)
                 
-            outputs.report_final_results(ys_corr_train , ys_pred_train, train = True)
-            outputs.report_final_results(ys_corr_test , ys_pred_test, train = False)
-        
+            metrics.report_final_results(ys_corr_train , ys_pred_train, train = True)
+            metrics.report_final_results(ys_corr_test , ys_pred_test, train = False)
+            
         logging.info('Train loss ' + str(epoch) + '/' + str(n_epochs) + ': ' +str(np.average(all_train_losses)))
         logging.info('Val loss ' + str(epoch) + '/' + str(n_epochs) + ': '+str(np.average(all_val_losses)))
 

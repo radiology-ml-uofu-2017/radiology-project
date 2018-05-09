@@ -5,8 +5,10 @@ from configs import configs
 import torchvision
 import torch.nn.functional as F
 import torch.utils.model_zoo as model_zoo
+import time
+import logging 
 
-labels_columns = configs.get_enum_return('get_labels_columns')
+labels_columns = configs['get_labels_columns']
 
 def cmp(a, b):
     return (a > b) - (a < b)
@@ -52,6 +54,8 @@ def get_model(num_ftrs):
 
     model = torch.nn.Sequential()
     current_n_channels = num_ftrs
+    #if configs['use_lateral']:
+    #    current_n_channels = 2*current_n_channels
     if configs['use_conv11']:
         if configs['use_batchnormalization_hidden_layers']:
             model.add_module("bn_conv11",torch.nn.BatchNorm2d(current_n_channels).cuda())
@@ -70,7 +74,10 @@ def get_model(num_ftrs):
         model.add_module("drop_"+str(layer_i),nn.Dropout(p=configs['use_dropout_hidden_layers']).cuda())
         if configs['use_batchnormalization_hidden_layers']:
             model.add_module("bn_"+str(layer_i),torch.nn.BatchNorm1d(current_n_channels).cuda())
-        model.add_module("linear_"+str(layer_i),nn.Linear(current_n_channels, configs['channels_hidden_layers'] ).cuda()) # this line, in the first iteration of the loop, is the one taking a long time (about 50s)
+            
+        # this next line, in the first iteration of the loop, is the one taking a long time (about 50s) in the .cuda() part.
+        # probably because of some incompatibility between Cuda 9.0 and pytorch 0.1.12
+        model.add_module("linear_"+str(layer_i),nn.Linear(current_n_channels, configs['channels_hidden_layers'] ).cuda()) 
         model.add_module("relu_"+str(layer_i),nn.ReLU().cuda())
         current_n_channels = configs['channels_hidden_layers']
           

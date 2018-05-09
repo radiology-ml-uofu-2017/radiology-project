@@ -18,7 +18,7 @@ except:
 
 percentage_labels = ['fev1fvc_pred','fev1fvc_predrug','fvc_ratio','fev1_ratio','fev1fvc_ratio']
 
-labels_columns = configs.get_enum_return('get_labels_columns')
+labels_columns = configs['get_labels_columns']
 
 def write_filenames():
     pathFileTrain = '/home/sci/ricbl/Documents/projects/radiology-project/pft/train2.txt'
@@ -168,7 +168,7 @@ def get_labels():
         ranges_labels[label] = [np.amin(x), np.amax(x)]
     
     if configs['network_output_kind']=='sigmoid':
-        all_labels = all_labels.apply(sigmoid_normalization(ranges_labels))
+        all_labels[labels_columns] = all_labels[labels_columns].apply(sigmoid_normalization(ranges_labels))
     
     if configs['use_log_transformation']:
         all_labels[labels_columns] = all_labels[labels_columns].apply(np.log)
@@ -230,5 +230,6 @@ def get_images():
 
 def sigmoid_normalization(ranges_labels):
     def f(col):
-        return (col-ranges_labels[col.name][0]*safety_constant[col.name][0])/ranges_labels[col.name][1]/safety_constant[col.name][1]
+        return (col-ranges_labels[col.name][0]*configs['sigmoid_safety_constant'][col.name][0])/ranges_labels[col.name][1]/configs['sigmoid_safety_constant'][col.name][1]
+    print(f)
     return f
