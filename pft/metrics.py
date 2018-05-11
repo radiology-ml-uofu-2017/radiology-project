@@ -59,7 +59,8 @@ def report_final_results(y_corr , y_pred, train):
     
     for k in range(len(configs['pft_plot_columns'])):
         this_plot, = plt.plot(configs['pft_plot_function'](y_corr, k),configs['pft_plot_function'](y_pred, k), markers[k])
-        plot_var_for_legend.append(this_plot)
+        #plot_var_for_legend.append(this_plot)
+        plot_var_for_legend=[this_plot]
     
         plt.legend(plot_var_for_legend, [configs['pft_plot_columns'][k]],
                     scatterpoints=1,

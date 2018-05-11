@@ -38,7 +38,7 @@ except:
 from configs import configs
 
 
-configs.load_predefined_set_of_configs('densenet') #'densenet', 'frozen_densenet'
+configs.load_predefined_set_of_configs('frozen_densenet') #'densenet', 'frozen_densenet'
 
 configs.open_get_block_set()
 
@@ -134,17 +134,24 @@ def sigmoid_denormalization(np_array, ranges_labels):
         np_array[i,:] =  np_array[i,:]*ranges_labels[col_name][1]*configs['sigmoid_safety_constant'][col_name][1]+ranges_labels[col_name][0]*configs['sigmoid_safety_constant'][col_name][0]
     return np_array
 
+def select_columns_one_table_after_merge(df, suffix, keep_columns=[]):
+    to_select = [x for x in df if x.endswith(suffix)]+keep_columns
+    to_return = df[to_select]
+    to_return.columns = [(x[:-(len(suffix))] if (x not in keep_columns) else x) for x in to_return ]
+    return to_return
+
 def get_loader(set_of_images, cases_to_use, all_labels, transformSequence, train):
     cases_to_use_on_set_of_images = []
     for i in range(len(set_of_images)):
-        cases_to_use_on_set_of_images.append(
-            pd.merge(
-              pd.merge(
-                  set_of_images[i], 
-                  cases_to_use, 
-                  on=['subjectid', 'crstudy']), 
-              all_labels, 
-              on=['subjectid', 'crstudy']))
+        current_df = set_of_images[i].copy(deep=True)
+        current_df.columns = current_df.columns.map(lambda x: ((str(x) + '_'+str(i)) if x not in ['subjectid', 'crstudy'] else str(x)))
+        if i == 0:
+            all_joined_table =  pd.merge(cases_to_use, current_df, on=['subjectid', 'crstudy'])#, suffixes=('_cases', '_'+str(i)))
+        else:
+            all_joined_table = pd.merge(all_joined_table, current_df, on=['subjectid', 'crstudy'])#, suffixes=('_'+str(i-1), '_'+str(i)))
+    for i in range(len(set_of_images)):
+        cases_to_use_on_set_of_images.append(pd.merge(select_columns_one_table_after_merge(all_joined_table, '_'+str(i), ['subjectid', 'crstudy']),all_labels, on=['subjectid', 'crstudy']))
+        
         logging.info('size ' + ('train' if train else 'test') + ' ' + str(i) +': '+str(np.array(cases_to_use_on_set_of_images[i]).shape[0]))
     t_dataset = inputs.DatasetGenerator(cases_to_use_on_set_of_images, transformSequence)
     if train:
@@ -191,18 +198,14 @@ def load_training_pipeline(cases_to_use, all_images, all_labels, transformSequen
                 testids = set(subjectids[queue[:int(0.2*subjectids.shape[0])]])
             #with open('./testsubjectids.pkl', 'w') as f:  # Python 3: open(..., 'wb')
             #    pickle.dump(testids, f)
+
             test_images = cases_to_use.loc[cases_to_use['subjectid'].isin(testids)]
             train_images = cases_to_use.loc[~cases_to_use['subjectid'].isin(testids)]  
             assert(len(pd.merge(test_images, train_images, on=['subjectid'])) == 0)
-        
+
         logging.info('total images training: '+str(np.array(train_images).shape[0]))
         logging.info('total images test: '+str(np.array(test_images).shape[0]))
         
-        #train_loader = []
-        #test_loader = []
-        #for i, set_of_images in enumerate(all_images):
-        #    train_loader.append(get_loader(set_of_images, train_images, all_labels, transformSequence, train = True))
-        #    test_loader.append(get_loader(set_of_images, test_images, all_labels, transformSequence, train= False))
         train_loader=get_loader(all_images, train_images, all_labels, transformSequence, train = True)
         test_loader=get_loader(all_images, test_images, all_labels, transformSequence, train= False)
 

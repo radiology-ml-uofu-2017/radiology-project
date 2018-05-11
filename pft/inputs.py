@@ -103,6 +103,11 @@ class DatasetGenerator(Dataset):
                 
             else:
                 if configs['trainable_densenet']:
+                    #a = self.listImage[i]
+                    #b = a['preprocessed']
+                    #print(index)
+                    #print(len(b))
+                    #c = b.iloc[index]
                     old_index = self.listImage[i]['preprocessed'].iloc[index]
                     
                     imageData.append(self.file['dataset_1'][old_index,...].astype('float32'))
@@ -228,7 +233,7 @@ def get_all_images():
             pickle.dump(all_images, f, protocol=2)
     elif (not configs['trainable_densenet']) and (configs['load_image_features_from_file']):
         all_images = pd.read_pickle(get_name_pickle_file())
-    
+
     all_images['image_index'] = all_images.index
     
     if (configs['trainable_densenet'] and (configs['load_image_features_from_file'])):

@@ -48,7 +48,7 @@ class ConfigsClass(object):
     def log_configs(self):
         logging.info('-------------------------------used configs-------------------------------')
         for key, value in iteritems(self.configs):
-            logging.info(key + ': ' + str(self.get_variable(key)))
+            logging.info(key + ': ' + str(self.get_variable(key)).replace('\n', ' ').replace('\r', ''))
         logging.info('-----------------------------end used configs-----------------------------')
         
     def add_predefined_set_of_configs(self,name, dict_configs):
@@ -136,8 +136,13 @@ configs.add_self_referenced_variable_from_dict('get_available_memory', 'machine_
                                       {'dgx': 15600-560, 
                                        'titan':11700-560, 
                                        'other':9000-1120-600}) 
-    
-configs.add_variable('BATCH_SIZE',lambda configs: int(configs['get_available_memory']/140./(2. if configs['use_lateral'] else 1)))
+def get_batch_size(configs):
+    if configs['trainable_densenet']:
+        return int(configs['get_available_memory']/140./(2. if configs['use_lateral'] else 1))
+    else:
+        return 128
+
+configs.add_variable('BATCH_SIZE',lambda configs: get_batch_size(configs))
 
 configs.add_predefined_set_of_configs('frozen_densenet', {})
 

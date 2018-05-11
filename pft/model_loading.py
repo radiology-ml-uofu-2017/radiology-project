@@ -69,7 +69,7 @@ class ModelMoreInputs(nn.Module):
             if configs['trainable_densenet']:
                 cnns.append(get_model_cnn())
             else:
-                self.cnn.append(nn.Sequential())
+                cnns.append(nn.Sequential())
         self.cnn = nn.ModuleList(cnns)
         
     def forward(self, args):
