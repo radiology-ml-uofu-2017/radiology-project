@@ -6,18 +6,18 @@
 #SBATCH -o dgx_log/slurm-%j.out-%N # name of the stdout, using the job number (%j) and the first node (%N)
 #SBATCH -e dgx_log/slurm-%j.err-%N # name of the stderr, using the job number (%j) and the first node (%N)
 #SBATCH --mem=50G
-
+from future.utils import raise_with_traceback
 import torch
 import sys
 import os
 import time
+import argparse
 
 sys.path.append(os.getcwd())
-os.environ['CUDA_VISIBLE_DEVICES'] = "3"
+
 import logging
-timestamp = time.strftime("%Y%m%d-%H%M%S")
-logging.basicConfig( filename = 'log/log'+timestamp+'.txt', level=logging.INFO)
-print('log'+timestamp+'.txt')
+
+
 import numpy as np
 np.set_printoptions(threshold=np.inf)
 import torch.nn as nn
@@ -29,12 +29,26 @@ from torch.utils.data.sampler import SubsetRandomSampler
 from random import *
 import pandas as pd
 from torch.utils.data import DataLoader
+from itertools import izip
+
+from configs import configs
+
+
+configs.load_predefined_set_of_configs('densenet') #'densenet', 'frozen_densenet'
+
+configs.open_get_block_set()
+
+logging.basicConfig( filename = 'log/log'+configs['timestamp']+'.txt', level=logging.INFO)
+
+print('log'+configs['timestamp']+'.txt')
+
+labels_columns = configs['get_labels_columns']
 
 import model_loading
 import utils
-from configs import configs
 import metrics
 import inputs
+import time
 
 logging.info('Using PyTorch ' +str(torch.__version__))
 
@@ -42,10 +56,16 @@ NUM_WORKERS = 1
 # faster to have one worker and use non thread safe h5py to load preprocessed images
 # than other tested options
 
-labels_columns = configs['get_labels_columns']
-configs.load_predefined_set_of_configs('densenet') #'densenet', 'frozen_densenet'
+parser = argparse.ArgumentParser()
+parser.add_argument('-c','--cvd', required=False)
+args = vars(parser.parse_args())
 
-def run_epoch(loader, model, criterion, optimizer, epoch=0, n_epochs=0, train=True, ranges_labels = None):
+if configs['machine_to_use'] == 'titan':
+    if args['cvd'] is None:
+        raise_with_traceback(ValueError('You should set Cuda Visible Devices (-c or --cvd) when using titan'))
+    os.environ['CUDA_VISIBLE_DEVICES'] = args['cvd']
+
+def run_epoch(loaders, model, criterion, optimizer, epoch=0, n_epochs=0, train=True, ranges_labels = None):
     # modified from https://github.com/gpleiss/temperature_scaling
     time_meter = utils.Meter(name='Time', cum=True)
     loss_meter = utils.Meter(name='Loss', cum=False)
@@ -59,18 +79,14 @@ def run_epoch(loader, model, criterion, optimizer, epoch=0, n_epochs=0, train=Tr
     lossValNorm = 0.0
     y_corr = np.empty([0,len(labels_columns)])
     y_pred = np.empty([0,len(labels_columns)])
-    for i, (input, target) in enumerate(loader):
+    for i, (input, target) in enumerate(loaders):
         if train:
             optimizer.zero_grad()
-
         # Forward pass
-        input = input.cuda(async=True)
-        target = target.cuda(async=True)
+        
+        output_var = model(torch.autograd.Variable(input.cuda(async=True, device = 0), volatile=(not train)))
 
-        input_var = torch.autograd.Variable(input, volatile=(not train))
-        target_var = torch.autograd.Variable(target, volatile=(not train))
-
-        output_var = model(input_var)
+        target_var = torch.autograd.Variable(target.cuda(async=True, device = 0), volatile=(not train))
         loss = criterion(output_var, target_var)
         
         output_var_fixed = output_var.data.cpu().numpy()
@@ -100,10 +116,12 @@ def run_epoch(loader, model, criterion, optimizer, epoch=0, n_epochs=0, train=Tr
         loss_meter.update(loss)
         if not train:
             pass
-        #lossMean += len(input)*loss.data.cpu().numpy()
-        lossMean += len(input)*loss.data[0]
-        lossValNorm += len(input)
-    
+
+        this_batch_size = len(input)
+        #lossMean += this_batch_size*loss.data.cpu().numpy()
+        lossMean += this_batch_size*loss.data[0]
+        lossValNorm += this_batch_size
+    #logging.info('oi1 ' + str(time.time() - start))
     return time_meter.value(), loss_meter.value(), np.atleast_1d(lossMean/lossValNorm), y_corr, y_pred
 
 def sigmoid_denormalization(np_array, ranges_labels):
@@ -112,20 +130,29 @@ def sigmoid_denormalization(np_array, ranges_labels):
         np_array[i,:] =  np_array[i,:]*ranges_labels[col_name][1]*configs['sigmoid_safety_constant'][col_name][1]+ranges_labels[col_name][0]*configs['sigmoid_safety_constant'][col_name][0]
     return np_array
 
-def count_unique_images_and_pairs(images_to_use, all_examples):
-    images_to_use['old_index_pa'] = images_to_use.index
-    lat_images = all_examples[all_examples['position'].isin(['LAT'])]
-    lat_images['old_index_lat'] = lat_images.index
-    b = pd.merge(images_to_use, lat_images, on=['subjectid', 'crstudy'])
-    print(len(images_to_use['image_index'].unique()))
-    print(len(images_to_use['old_index_pa'].unique()))
-    print(len(b['image_index_x'].unique()))
-    print(len(b['image_index_y'].unique()))
-    print(len(b['old_index_pa'].unique()))
-    print(len(b['old_index_lat'].unique()))
+def get_loader(set_of_images, cases_to_use, all_labels, transformSequence, train):
+    cases_to_use_on_set_of_images = []
+    for i in range(len(set_of_images)):
+        cases_to_use_on_set_of_images.append(
+            pd.merge(
+              pd.merge(
+                  set_of_images[i], 
+                  cases_to_use, 
+                  on=['subjectid', 'crstudy']), 
+              all_labels, 
+              on=['subjectid', 'crstudy']))
+    t_dataset = inputs.DatasetGenerator(cases_to_use_on_set_of_images, transformSequence)
+    if train:
+      t_indices = torch.randperm(len(t_dataset))
+      t_loader = DataLoader(dataset=t_dataset, batch_size=configs['BATCH_SIZE'],
+                          sampler=SubsetRandomSampler(t_indices), num_workers=NUM_WORKERS, pin_memory=True, drop_last = True)
+    else:
+        t_loader = DataLoader(dataset=t_dataset, batch_size=configs['BATCH_SIZE'],
+                                shuffle=False, num_workers=NUM_WORKERS, pin_memory=True)
+    return t_loader
 
 # creates models, optimizers, criterion and dataloaders for all models that will be trained in parallel
-def load_training_pipeline(images_to_use, transformSequence, num_ftrs):
+def load_training_pipeline(cases_to_use, all_images, all_labels, transformSequence, num_ftrs):
   
     models = []
     criterions = []
@@ -135,7 +162,7 @@ def load_training_pipeline(images_to_use, transformSequence, num_ftrs):
     test_loaders = []
     
     configs.add_self_referenced_variable_from_dict('get_training_range', 'training_pipeline', 
-                                          {'one_vs_all':images_to_use['subjectid'].unique(),
+                                          {'one_vs_all':cases_to_use['subjectid'].unique(),
                                            'simple': range(1),
                                            'ensemble': range(configs['total_ensemble_models'])})
 
@@ -143,33 +170,33 @@ def load_training_pipeline(images_to_use, transformSequence, num_ftrs):
     
     for i in training_range:
         if configs['training_pipeline']=='one_vs_all':
-            train_images = images_to_use[images_to_use['subjectid']!=i]  
-            test_images = images_to_use[images_to_use['subjectid']==i]
+            train_images = cases_to_use[cases_to_use['subjectid']!=i]  
+            test_images = cases_to_use[cases_to_use['subjectid']==i]
         else:
-            subjectids = np.array(images_to_use['subjectid'].unique())
+            subjectids = np.array(cases_to_use['subjectid'].unique())
             if configs['use_fixed_test_set']:
-                prng = np.random.RandomState(83936018)
+                #prng = np.random.RandomState(83936018)
+                queue = np.load('./testsubjectids.npy')
             else:
                 prng = np.random.RandomState()
-            queue = prng.permutation(subjectids.shape[0])
+                queue = prng.permutation(subjectids.shape[0])
+            #np.save('./testsubjectids.np', np.array(queue))
             testids = set(subjectids[queue[:int(0.2*subjectids.shape[0])]])
-            test_images = images_to_use.loc[images_to_use['subjectid'].isin(testids)]
-            train_images = images_to_use.loc[~images_to_use['subjectid'].isin(testids)]  
+            test_images = cases_to_use.loc[cases_to_use['subjectid'].isin(testids)]
+            train_images = cases_to_use.loc[~cases_to_use['subjectid'].isin(testids)]  
             assert(len(pd.merge(test_images, train_images, on=['subjectid'])) == 0)
-        
 
         logging.info('size training: '+str(np.array(train_images).shape[0]))
         logging.info('size test: '+str(np.array(test_images).shape[0]))
         
-        train_dataset = inputs.DatasetGenerator(train_images, transformSequence)
-        
-        train_indices = torch.randperm(len(train_dataset))  
-        train_loader = DataLoader(dataset=train_dataset, batch_size=configs['BATCH_SIZE'],
-                                sampler=SubsetRandomSampler(train_indices), num_workers=NUM_WORKERS, pin_memory=True, drop_last = True)                          
-        
-        test_dataset = inputs.DatasetGenerator(test_images, transformSequence)
-        test_loader = DataLoader(dataset=test_dataset, batch_size=configs['BATCH_SIZE'],
-                                shuffle=False, num_workers=NUM_WORKERS, pin_memory=True)
+        #train_loader = []
+        #test_loader = []
+        #for i, set_of_images in enumerate(all_images):
+        #    train_loader.append(get_loader(set_of_images, train_images, all_labels, transformSequence, train = True))
+        #    test_loader.append(get_loader(set_of_images, test_images, all_labels, transformSequence, train= False))
+        train_loader=get_loader(all_images, train_images, all_labels, transformSequence, train = True)
+        test_loader=get_loader(all_images, test_images, all_labels, transformSequence, train= False)
+            
         logging.info('finished loaders and generators. starting models')
         
         model = model_loading.get_model(num_ftrs)
@@ -213,7 +240,7 @@ def train(models, criterions, optimizers, schedulers, train_loaders, test_loader
             test_loader = test_loaders[i]
         
             _, _, loss, y_corr_train, y_pred_train = run_epoch(
-                loader=train_loader,
+                loaders=train_loader,
                 model=model,
                 criterion=criterion,
                 optimizer=optimizer,
@@ -224,7 +251,8 @@ def train(models, criterions, optimizers, schedulers, train_loaders, test_loader
                 ) 
             
             all_train_losses = np.concatenate((all_train_losses, loss), axis=0)
-            _, _, loss, y_corr_test, y_pred_test = run_epoch(loader=test_loader,
+            _, _, loss, y_corr_test, y_pred_test = run_epoch(
+                loaders=test_loader,
                 model=model,
                 criterion=criterion,
                 optimizer=None,
@@ -265,6 +293,15 @@ def train(models, criterions, optimizers, schedulers, train_loaders, test_loader
         logging.info('Train loss ' + str(epoch) + '/' + str(n_epochs) + ': ' +str(np.average(all_train_losses)))
         logging.info('Val loss ' + str(epoch) + '/' + str(n_epochs) + ': '+str(np.average(all_val_losses)))
 
+def merge_images_and_labels(all_images, all_labels):
+    for i, image_set in enumerate(all_images):
+        if i == 0:
+            all_images_merged = image_set[['subjectid', 'crstudy']]
+        else:
+            all_images_merged = pd.merge(all_images_merged, image_set, on=['subjectid', 'crstudy'])[['subjectid', 'crstudy']]
+    cases_to_use = pd.merge(all_images_merged, all_labels, on=['subjectid', 'crstudy'])[['subjectid', 'crstudy']]
+    return cases_to_use
+
 def main():
     cudnn.benchmark = False
     configs.log_configs()
@@ -278,10 +315,9 @@ def main():
     all_labels, ranges_labels = inputs.get_labels()
     
     logging.info('ended label loading')
+    cases_to_use = merge_images_and_labels(all_images, all_labels)
     
-    images_to_use = pd.merge(all_images, all_labels, on=['subjectid', 'crstudy'])
-    
-    models, criterions, optimizers, schedulers, train_loaders, test_loaders = load_training_pipeline(images_to_use, transformSequence, num_ftrs)
+    models, criterions, optimizers, schedulers, train_loaders, test_loaders = load_training_pipeline(cases_to_use, all_images, all_labels, transformSequence, num_ftrs)
     train(models, criterions, optimizers, schedulers, train_loaders, test_loaders, ranges_labels)
     
 if __name__ == '__main__':

@@ -16,7 +16,7 @@ except:
     import _pickle as pickle 
 
 
-percentage_labels = ['fev1fvc_pred','fev1fvc_predrug','fvc_ratio','fev1_ratio','fev1fvc_ratio']
+percentage_labels = configs['percentage_labels']
 
 labels_columns = configs['get_labels_columns']
 
@@ -89,29 +89,35 @@ class DatasetGenerator(Dataset):
             #much slower
             #store = Store('all_images_224_224_prot2.2.h5df', mode="r")
             #self.df1 = store["/frames/1"]
-        else: 
-            self.n_images = len(self.listImage)
-        self.n_images = len(self.listImage)
+        self.n_images = len(self.listImage[0])
         self.transform = transform
     
     #-------------------------------------------------------------------------------- 
     
     def __getitem__(self, index):
-        if (configs['trainable_densenet'] and (not configs['load_image_features_from_file'])):
-            imagePath = self.listImage['filepath'].iloc[index]
-            imageData = Image.open(imagePath)
-            
-        else:
-            if configs['trainable_densenet']:
-                old_index = self.listImage['preprocessed'].iloc[index]
+        imageData = []
+        for i in range(len(self.listImage)):
+            if (configs['trainable_densenet'] and (not configs['load_image_features_from_file'])):
+                imagePath = self.listImage[i]['filepath'].iloc[index]
+                imageData.append(Image.open(imagePath))
                 
-                imageData = self.file['dataset_1'][old_index,...].astype('float32')
-                
-                #much slower:
-                #examples_to_read = ['ind' + str(old_index)]
-                #imageData = self.df1.rows(examples_to_read).values.reshape(3,224,224)
             else:
-                imageData = self.listImage['preprocessed'].iloc[index][0]
+                if configs['trainable_densenet']:
+                    old_index = self.listImage[i]['preprocessed'].iloc[index]
+                    
+                    imageData.append(self.file['dataset_1'][old_index,...].astype('float32'))
+                    
+                    #much slower:
+                    #examples_to_read = ['ind' + str(old_index)]
+                    #imageData = self.df1.rows(examples_to_read).values.reshape(3,224,224)
+                else:
+                    imageData.append(self.listImage[i]['preprocessed'].iloc[index][0])
+                    
+            if self.transform is not None: 
+                imageData[i] = self.transform(imageData[i])
+            imageData[i] = np.expand_dims(imageData[i], 0)
+        imageData = np.concatenate(imageData,0)
+        # for checking integrity of images and rest of data
         #a = self.listImage[labels_columns]
         #print(index)
         #print(len(a))
@@ -123,11 +129,9 @@ class DatasetGenerator(Dataset):
         #print(np.amin(b))
         #plt.imshow(b)
         #plt.savefig('test.png')
-        #1/0
-        imageLabel= torch.FloatTensor(self.listImage[labels_columns].iloc[index])
+        imageLabel= torch.FloatTensor(self.listImage[0][labels_columns].iloc[index])
         #self.transform = transforms.ToTensor()
-        if self.transform is not None: 
-            imageData = self.transform(imageData)
+        
         return imageData, imageLabel
         
     #-------------------------------------------------------------------------------- 
@@ -173,9 +177,21 @@ def get_labels():
     if configs['use_log_transformation']:
         all_labels[labels_columns] = all_labels[labels_columns].apply(np.log)
     return all_labels, ranges_labels
-  
-def get_images():
-    #selects sets of data to use
+
+def count_unique_images_and_pairs(images_to_use, all_examples):
+    images_to_use['old_index_pa'] = images_to_use.index
+    lat_images = all_examples[all_examples['position'].isin(['LAT'])]
+    lat_images['old_index_lat'] = lat_images.index
+    b = pd.merge(images_to_use, lat_images, on=['subjectid', 'crstudy'])
+    print(len(images_to_use['image_index'].unique()))
+    print(len(images_to_use['old_index_pa'].unique()))
+    print(len(b['image_index_x'].unique()))
+    print(len(b['image_index_y'].unique()))
+    print(len(b['old_index_pa'].unique()))
+    print(len(b['old_index_lat'].unique()))
+    
+def get_all_images():
+        #selects sets of data to use
     if configs['use_set_29']:
         file_with_image_filenames = 'train.txt'
     else:
@@ -216,8 +232,17 @@ def get_images():
     
     if (configs['trainable_densenet'] and (configs['load_image_features_from_file'])):
         all_images['preprocessed'] = all_images.index
+    return all_images, num_ftrs
+        
+def get_images():
+
+    all_images, num_ftrs = get_all_images()
     
-    all_images = all_images[all_images['position'].isin(configs['positions_to_use'])]
+    sets_of_images = []
+    sets_of_images.append(all_images[all_images['position'].isin(configs['positions_to_use'])])
+    
+    if configs['use_lateral']:
+        sets_of_images.append(all_images[all_images['position'].isin(['LAT'])])
     
     if configs['trainable_densenet'] and (not configs['load_image_features_from_file']):
         transformSequence = transforms.Compose(list_pretransforms)
@@ -226,7 +251,7 @@ def get_images():
     else: 
         transformSequence = transforms.Compose([image_preprocessing.RandomHorizontalFlipNumpy()])
         
-    return all_images, transformSequence, num_ftrs
+    return sets_of_images, transformSequence, num_ftrs
 
 def sigmoid_normalization(ranges_labels):
     def f(col):

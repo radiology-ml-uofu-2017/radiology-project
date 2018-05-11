@@ -4,32 +4,34 @@ import time
 import socket 
 from future.utils import iteritems
 import torch.nn as nn
+from random import randint
 
 class ConfigsClass(object):
     def __init__(self):
         self.configs = {}
         self.predefined = {}
-        self.configs_values_frozen = False
-        self.configs_keys_frozen = False
+        self.configs_set_values_frozen = False
+        self.configs_get_values_frozen = True
+        self.configs_add_variables_frozen = False
         
     def __getitem__(self, name):
+        if self.configs_get_values_frozen:
+            raise_with_traceback(ValueError('Variables cannot be used yet because they were not freed'))
         return self.get_variable(name)
     
     def __setitem__(self, key, item):
-        if self.configs_values_frozen:
-            pass
-            #raise_with_traceback(ValueError('Variables cannot be changed anymore because they were frozen'))
+        if self.configs_set_values_frozen:
+            raise_with_traceback(ValueError('Variables cannot be changed anymore because they were frozen'))
         if key not in list(self.configs.keys()):
             raise_with_traceback(ValueError('Variable ' + name + 'was not added to configs'))
         self.set_variable(key, item)
         
     def freeze_configs_keys(self):
-        self.configs_keys_frozen = True
+        self.configs_add_variables_frozen = True
         
     def add_variable(self, name, default):
-        if self.configs_keys_frozen:
-            pass
-            #raise_with_traceback(ValueError('Variables cannot be added anymore because they were frozen'))
+        if self.configs_add_variables_frozen:
+            raise_with_traceback(ValueError('Variables cannot be added anymore because they were frozen'))
         if name in list(self.configs.keys()):
             raise_with_traceback(ValueError('Variable ' + name + 'was already added before'))
         self.set_variable(name, default)
@@ -57,14 +59,17 @@ class ConfigsClass(object):
     def load_predefined_set_of_configs(self, name):
         for key, value in iteritems(self.predefined[name]):
             self.set_variable(key, value)
-        self.configs_values_frozen = True
     
     def add_self_referenced_variable_from_dict(self,new_variable_name, referenced_variable_name, dict_returns):
         def a(configs):
             return dict_returns[configs[referenced_variable_name]]
         self.add_variable(new_variable_name,a)
     
-timestamp = time.strftime("%Y%m%d-%H%M%S")
+    def open_get_block_set(self):
+        self.configs_set_values_frozen = True
+        self.configs_get_values_frozen = False
+    
+timestamp = time.strftime("%Y%m%d-%H%M%S")+ '-' + str(randint(1000, 9999))
 
 configs = ConfigsClass()
 
@@ -74,10 +79,10 @@ configs.add_variable('use_set_29', False)
 configs.add_variable('use_log_transformation', False)
 configs.add_variable('CKPT_PATH', 'model.pth.tar')
 configs.add_variable('timestamp', timestamp)
-configs.add_variable('output_image_name', 'results' + timestamp + '.png')
+configs.add_variable('output_image_name', 'results' + timestamp +'.png')
 #configs.add_variable('output_model_name', 'model' + timestamp + '.pth')
 #configs.add_variable('save_model', True)
-configs.add_variable('N_EPOCHS', 1)
+configs.add_variable('N_EPOCHS', 50)
 configs.add_variable('use_lr_scheduler', True)
 configs.add_variable('kind_of_loss', 'l2') #'l1' or 'l2', 'smoothl1', or 'bce'
 configs.add_variable('positions_to_use', ['PA']) # set of 'PA', 'AP', 'LAT' in a list 
@@ -88,11 +93,13 @@ configs.add_variable('weight_initialization', 'original') # 'xavier', 'original'
 configs.add_variable('bias_initialization', 'original') #'constant', 'original'
 configs.add_variable('total_ensemble_models', 5) # only used if configs['training_pipeline']=='ensemble'
 configs.add_variable('output_copd', False)
+configs.add_variable('percentage_labels', ['fev1fvc_pred','fev1fvc_predrug','fvc_ratio','fev1_ratio','fev1fvc_ratio'])
 
 #These are the main configs to change from default
 configs.add_variable('trainable_densenet', False)
 configs.add_variable('use_conv11', False)
 configs.add_variable('labels_to_use', 'only_absolute') # 'two_ratios', 'three_absolute', 'all_nine' or 'only_absolute'  or 'none'
+configs.add_variable('use_lateral', False)
 
 # configuration of architecture of end of model
 configs.add_variable('n_hidden_layers', 2)
@@ -105,7 +112,6 @@ configs.add_variable('network_output_kind', 'linear') #'linear', 'softplus' , 's
 # these configs are modified depending on model and machine
 configs.add_variable('machine_to_use', 'dgx' if socket.gethostname() == 'rigveda' else 'titan' if socket.gethostname() =='linux-55p6' or socket.gethostname() == 'titan' else 'other')
 configs.add_variable('remove_pre_avg_pool', True)
-configs.add_variable('BATCH_SIZE', 128)
 configs.add_variable('l2_reg', 0.05)
 
 configs.add_variable('sigmoid_safety_constant', 
@@ -121,13 +127,17 @@ configs.add_variable('sigmoid_safety_constant',
                    'copd':[1.0,1.0]}
                     )
 
-configs.freeze_configs_keys()
-
 configs.add_predefined_set_of_configs('densenet', { 'trainable_densenet':True, 
                                            'remove_pre_avg_pool':False,
-                                             'BATCH_SIZE': 64 if configs['machine_to_use']=='dgx' or configs['machine_to_use']=='titan' else 16,    
                                              'l2_reg':0,
                                              'use_dropout_hidden_layers':0.25})
+
+configs.add_self_referenced_variable_from_dict('get_available_memory', 'machine_to_use',
+                                      {'dgx': 15600-560, 
+                                       'titan':11700-560, 
+                                       'other':9000-1120-600}) 
+    
+configs.add_variable('BATCH_SIZE',lambda configs: int(configs['get_available_memory']/140./(2. if configs['use_lateral'] else 1)))
 
 configs.add_predefined_set_of_configs('frozen_densenet', {})
 

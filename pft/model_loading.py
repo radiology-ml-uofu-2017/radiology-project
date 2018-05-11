@@ -1,3 +1,4 @@
+from future.utils import raise_with_traceback
 import re
 import torch
 import torch.nn as nn
@@ -48,14 +49,54 @@ def load_pretrained_chexnet():
 class Flatten(nn.Module):
     def forward(self, input):
         return input.view(input.size(0), -1)
-      
-def get_model(num_ftrs):
-    # initialize and load the model
 
+def get_model_cnn():
+    x = load_pretrained_chexnet()
+    x.module.set_classifier_containing_avg_pool_part(nn.Sequential())
+    return x.module.cuda()
+    
+class ModelMoreInputs(nn.Module):
+    def __init__(self, num_ftrs):
+        super(ModelMoreInputs, self).__init__()
+        self.n_inputs = 1
+        if configs['use_lateral']:
+            self.n_inputs = 2
+        self.fc = get_model_fc(num_ftrs*self.n_inputs)
+        #self.cnn = get_model_cnn()
+        
+        cnns = []
+        for i in range(self.n_inputs):
+            if configs['trainable_densenet']:
+                cnns.append(get_model_cnn())
+            else:
+                self.cnn.append(nn.Sequential())
+        self.cnn = nn.ModuleList(cnns)
+        
+    def forward(self, args):
+        #args = args.transpose(0,1).contiguous()
+        #print(args.size())
+        all_outputs = []
+        if not args.size()[1]==self.n_inputs:
+            raise_with_traceback(ValueError('Wrong number of arguments for the model forward function. Expected ' + str(self.n_inputs) + ' and received ' + str(args.size()[1])))
+        #for i, input_ in enumerate(args):
+        for i in range(args.size()[1]):
+            pass
+            #all_outputs.append(self.cnn[i](input_))
+            all_outputs.append(self.cnn[i](args[:,i,...]))
+        '''
+        print(torch.cat(all_outputs, 0).size())
+        print(torch.cat(all_outputs, 1).size())
+        print(torch.cat(all_outputs, 2).size())
+        print(torch.cat(all_outputs, 3).size())
+        '''
+        x = torch.cat(all_outputs, 1)
+        x = self.fc(x)
+        return x
+
+def get_model_fc(num_ftrs):
     model = torch.nn.Sequential()
     current_n_channels = num_ftrs
-    #if configs['use_lateral']:
-    #    current_n_channels = 2*current_n_channels
+    
     if configs['use_conv11']:
         if configs['use_batchnormalization_hidden_layers']:
             model.add_module("bn_conv11",torch.nn.BatchNorm2d(current_n_channels).cuda())
@@ -75,7 +116,7 @@ def get_model(num_ftrs):
         if configs['use_batchnormalization_hidden_layers']:
             model.add_module("bn_"+str(layer_i),torch.nn.BatchNorm1d(current_n_channels).cuda())
             
-        # this next line, in the first iteration of the loop, is the one taking a long time (about 50s) in the .cuda() part.
+        # On DGX, this next line, in the first iteration of the loop, is the one taking a long time (about 250s) in the .cuda() part.
         # probably because of some incompatibility between Cuda 9.0 and pytorch 0.1.12
         model.add_module("linear_"+str(layer_i),nn.Linear(current_n_channels, configs['channels_hidden_layers'] ).cuda()) 
         model.add_module("relu_"+str(layer_i),nn.ReLU().cuda())
@@ -93,17 +134,16 @@ def get_model(num_ftrs):
         raise_with_traceback(ValueError('configs["network_output_kind"] was set to an invalid value: ' + str(configs['network_output_kind'])))
     
     model.apply(weights_init)
-    if configs['trainable_densenet']:
-        outmodel = load_pretrained_chexnet()
-        
-        #for param in model.parameters():
-        #    param.requires_grad = False         
-        
-        outmodel.module.set_classifier_containing_avg_pool_part(model)
-        
-        outmodel = outmodel.cuda()
-    else:
-        outmodel = model
+    return model
+
+def get_model(num_ftrs):
+    outmodel = ModelMoreInputs(num_ftrs)
+    outmodel = torch.nn.DataParallel(outmodel).cuda()
+    #print(list(outmodel.parameters()))
+    #model = get_model_fc(num_ftrs)
+    #outmodel = load_pretrained_chexnet()
+    #outmodel.module.set_classifier_containing_avg_pool_part(model)
+    #outmodel = torch.nn.DataParallel(outmodel).cuda()
     return outmodel
 
 class DenseNet121(nn.Module):

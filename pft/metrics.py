@@ -61,11 +61,26 @@ def report_final_results(y_corr , y_pred, train):
         this_plot, = plt.plot(configs['pft_plot_function'](y_corr, k),configs['pft_plot_function'](y_pred, k), markers[k])
         plot_var_for_legend.append(this_plot)
     
-    plt.legend(plot_var_for_legend, configs['pft_plot_columns'],
-                scatterpoints=1,
-                loc='best',
-                ncol=2,
-                fontsize=8)
+        plt.legend(plot_var_for_legend, [configs['pft_plot_columns'][k]],
+                    scatterpoints=1,
+                    loc='best',
+                    ncol=2,
+                    fontsize=8)
+        
+        ax = plt.gca()
+        ylim = ax.get_ylim()
+        xlim = ax.get_xlim()
+        final_axis = (min(ylim[0],xlim[0]), max(ylim[1],xlim[1]))
+        ax.set_ylim(final_axis)
+        ax.set_xlim(final_axis)
+        plt.plot([final_axis[0], final_axis[1]], [final_axis[0], final_axis[1]], 'k-', lw=1)
+        plt.xlabel('Groundtruth', fontsize=10)
+        plt.ylabel('Predicted', fontsize=10)
+        plt.savefig('plots/' + train_string + '_' +configs['pft_plot_columns'][k]+ '_' + configs['output_image_name'])
+        plt.clf()
+        plt.cla()
+        plt.close()
+    
     r2s = {}
     for k in range(len(configs['pft_plot_columns'])):
         r2s[configs['pft_plot_columns'][k]] = r2(y_corr = configs['pft_plot_function'](y_corr,k), y_pred = configs['pft_plot_function'](y_pred,k))
@@ -81,16 +96,3 @@ def report_final_results(y_corr , y_pred, train):
         accuracies[configs['get_labels_columns_copd'][k]]['scores'] = get_precision_recall_from_dictionary(perfs)
         accuracies[configs['get_labels_columns_copd'][k]]['accuracy'] = (perfs['tn']+perfs['tp'])/(perfs['tn']+perfs['tn']+perfs['fp']+perfs['fn'])
     logging.info('accuracy: : ' + str(accuracies))
-    ax = plt.gca()
-    ylim = ax.get_ylim()
-    xlim = ax.get_xlim()
-    final_axis = (min(ylim[0],xlim[0]), max(ylim[1],xlim[1]))
-    ax.set_ylim(final_axis)
-    ax.set_xlim(final_axis)
-    plt.plot([final_axis[0], final_axis[1]], [final_axis[0], final_axis[1]], 'k-', lw=1)
-    plt.xlabel('Groundtruth', fontsize=10)
-    plt.ylabel('Predicted', fontsize=10)
-    plt.savefig('plots/' + train_string + configs['output_image_name'])
-    plt.clf()
-    plt.cla()
-    plt.close()
