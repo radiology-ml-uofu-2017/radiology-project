@@ -30,7 +30,11 @@ from random import *
 import pandas as pd
 from torch.utils.data import DataLoader
 from itertools import izip
-
+try:
+    import cPickle as pickle
+except:
+    import _pickle as pickle 
+    
 from configs import configs
 
 
@@ -141,6 +145,7 @@ def get_loader(set_of_images, cases_to_use, all_labels, transformSequence, train
                   on=['subjectid', 'crstudy']), 
               all_labels, 
               on=['subjectid', 'crstudy']))
+        logging.info('size ' + ('train' if train else 'test') + ' ' + str(i) +': '+str(np.array(cases_to_use_on_set_of_images[i]).shape[0]))
     t_dataset = inputs.DatasetGenerator(cases_to_use_on_set_of_images, transformSequence)
     if train:
       t_indices = torch.randperm(len(t_dataset))
@@ -176,18 +181,22 @@ def load_training_pipeline(cases_to_use, all_images, all_labels, transformSequen
             subjectids = np.array(cases_to_use['subjectid'].unique())
             if configs['use_fixed_test_set']:
                 #prng = np.random.RandomState(83936018)
-                queue = np.load('./testsubjectids.npy')
+                #queue = prng.permutation(subjectids.shape[0])
+                #testids = set(subjectids[queue[:int(0.2*subjectids.shape[0])]])
+                with open('./testsubjectids.pkl') as f:  # Python 3: open(..., 'rb')
+                    testids = pickle.load(f)
             else:
                 prng = np.random.RandomState()
                 queue = prng.permutation(subjectids.shape[0])
-            #np.save('./testsubjectids.np', np.array(queue))
-            testids = set(subjectids[queue[:int(0.2*subjectids.shape[0])]])
+                testids = set(subjectids[queue[:int(0.2*subjectids.shape[0])]])
+            #with open('./testsubjectids.pkl', 'w') as f:  # Python 3: open(..., 'wb')
+            #    pickle.dump(testids, f)
             test_images = cases_to_use.loc[cases_to_use['subjectid'].isin(testids)]
             train_images = cases_to_use.loc[~cases_to_use['subjectid'].isin(testids)]  
             assert(len(pd.merge(test_images, train_images, on=['subjectid'])) == 0)
-
-        logging.info('size training: '+str(np.array(train_images).shape[0]))
-        logging.info('size test: '+str(np.array(test_images).shape[0]))
+        
+        logging.info('total images training: '+str(np.array(train_images).shape[0]))
+        logging.info('total images test: '+str(np.array(test_images).shape[0]))
         
         #train_loader = []
         #test_loader = []
@@ -196,7 +205,7 @@ def load_training_pipeline(cases_to_use, all_images, all_labels, transformSequen
         #    test_loader.append(get_loader(set_of_images, test_images, all_labels, transformSequence, train= False))
         train_loader=get_loader(all_images, train_images, all_labels, transformSequence, train = True)
         test_loader=get_loader(all_images, test_images, all_labels, transformSequence, train= False)
-            
+
         logging.info('finished loaders and generators. starting models')
         
         model = model_loading.get_model(num_ftrs)
@@ -299,7 +308,7 @@ def merge_images_and_labels(all_images, all_labels):
             all_images_merged = image_set[['subjectid', 'crstudy']]
         else:
             all_images_merged = pd.merge(all_images_merged, image_set, on=['subjectid', 'crstudy'])[['subjectid', 'crstudy']]
-    cases_to_use = pd.merge(all_images_merged, all_labels, on=['subjectid', 'crstudy'])[['subjectid', 'crstudy']]
+    cases_to_use = pd.merge(all_images_merged, all_labels, on=['subjectid', 'crstudy'])[['subjectid', 'crstudy']].groupby(['subjectid', 'crstudy']).count().reset_index()
     return cases_to_use
 
 def main():

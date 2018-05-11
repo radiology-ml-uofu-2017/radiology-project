@@ -150,6 +150,7 @@ def get_labels():
     if not configs['use_set_29']:
         all_labels.rename(index=str, columns={"Subject_Global_ID": "subjectid", 
                                               "CRStudy_Local_ID": "crstudy",
+                                              "PFTExam_Local_ID": "pftid",
                                               'Predicted FVC':'fvc_pred',
                                               'Predicted FEV1':'fev1_pred',
                                               'Predicted FEV1/FVC':'fev1fvc_pred',
