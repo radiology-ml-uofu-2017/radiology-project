@@ -8,6 +8,7 @@ import torch.nn.functional as F
 import torch.utils.model_zoo as model_zoo
 import time
 import logging 
+import numpy as np
 
 labels_columns = configs['get_labels_columns']
 
@@ -54,18 +55,21 @@ def get_model_cnn():
     x = load_pretrained_chexnet()
     x.module.set_classifier_containing_avg_pool_part(nn.Sequential())
     return x.module.cuda()
-    
+
 class ModelMoreInputs(nn.Module):
     def __init__(self, num_ftrs):
         super(ModelMoreInputs, self).__init__()
         self.n_inputs = 1
         if configs['use_lateral']:
             self.n_inputs = 2
-        self.fc = get_model_fc(num_ftrs*self.n_inputs)
-        #self.cnn = get_model_cnn()
+        if configs['tie_cnns_same_weights']:
+            self.n_cnns = 1
+        else:
+            self.n_cnns = self.n_inputs 
+        self.fc = ModelFCPart(num_ftrs*self.n_inputs)
         
         cnns = []
-        for i in range(self.n_inputs):
+        for i in range(self.n_cnns):
             if configs['trainable_densenet']:
                 cnns.append(get_model_cnn())
             else:
@@ -73,71 +77,74 @@ class ModelMoreInputs(nn.Module):
         self.cnn = nn.ModuleList(cnns)
         
     def forward(self, args):
-        #args = args.transpose(0,1).contiguous()
-        #print(args.size())
         all_outputs = []
         if not args.size()[1]==self.n_inputs:
             raise_with_traceback(ValueError('Wrong number of arguments for the model forward function. Expected ' + str(self.n_inputs) + ' and received ' + str(args.size()[1])))
-        #for i, input_ in enumerate(args):
         for i in range(args.size()[1]):
-            pass
-            #all_outputs.append(self.cnn[i](input_))
-            all_outputs.append(self.cnn[i](args[:,i,...]))
-        '''
-        print(torch.cat(all_outputs, 0).size())
-        print(torch.cat(all_outputs, 1).size())
-        print(torch.cat(all_outputs, 2).size())
-        print(torch.cat(all_outputs, 3).size())
-        '''
+            if configs['tie_cnns_same_weights']:
+                index = 0
+            else:
+                index = i
+            all_outputs.append(self.cnn[index](args[:,i,...]))
+        
         x = torch.cat(all_outputs, 1)
         x = self.fc(x)
         return x
 
-def get_model_fc(num_ftrs):
-    model = torch.nn.Sequential()
-    current_n_channels = num_ftrs
-    
-    if configs['use_conv11']:
-        if configs['use_batchnormalization_hidden_layers']:
-            model.add_module("bn_conv11",torch.nn.BatchNorm2d(current_n_channels).cuda())
-        model.add_module("conv11",nn.Conv2d( in_channels = current_n_channels, out_channels =  configs['conv11_channels'], kernel_size = 1).cuda())
-        model.add_module("reluconv11",nn.ReLU().cuda())
-        current_n_channels = configs['conv11_channels']
+class ModelFCPart(nn.Module):
+    def __init__(self, num_ftrs):
+        super(ModelFCPart, self).__init__()
+        self.fc = torch.nn.Sequential()
+        current_n_channels = num_ftrs
         
-    if not configs['remove_pre_avg_pool']:
-        model.add_module("avgpool",nn.AvgPool2d(7).cuda())
-    else:
-        current_n_channels = current_n_channels*49
-    
-    model.add_module("flatten",Flatten().cuda())
-    
-    for layer_i in range(configs['n_hidden_layers']): 
-        model.add_module("drop_"+str(layer_i),nn.Dropout(p=configs['use_dropout_hidden_layers']).cuda())
-        if configs['use_batchnormalization_hidden_layers']:
-            model.add_module("bn_"+str(layer_i),torch.nn.BatchNorm1d(current_n_channels).cuda())
+        if configs['use_conv11']:
+            if configs['use_batchnormalization_hidden_layers']:
+                self.fc.add_module("bn_conv11",torch.nn.BatchNorm2d(current_n_channels).cuda())
+            self.fc.add_module("conv11",nn.Conv2d( in_channels = current_n_channels, out_channels =  configs['conv11_channels'], kernel_size = 1).cuda())
+            self.fc.add_module("reluconv11",nn.ReLU().cuda())
+            current_n_channels = configs['conv11_channels']
             
-        # On DGX, this next line, in the first iteration of the loop, is the one taking a long time (about 250s) in the .cuda() part.
-        # probably because of some incompatibility between Cuda 9.0 and pytorch 0.1.12
-        model.add_module("linear_"+str(layer_i),nn.Linear(current_n_channels, configs['channels_hidden_layers'] ).cuda()) 
-        model.add_module("relu_"+str(layer_i),nn.ReLU().cuda())
-        current_n_channels = configs['channels_hidden_layers']
-          
-    model.add_module("linear_out", nn.Linear(current_n_channels , len(labels_columns)).cuda())
-    
-    if configs['network_output_kind']=='linear':
-        pass
-    elif configs['network_output_kind']=='softplus':
-        model.add_module("softplus_out", nn.Softplus().cuda())
-    elif configs['network_output_kind']=='sigmoid':
-        model.add_module("sigmoid_out", nn.Sigmoid().cuda())
-    else:
-        raise_with_traceback(ValueError('configs["network_output_kind"] was set to an invalid value: ' + str(configs['network_output_kind'])))
-    
-    model.apply(weights_init)
-    return model
+        if not configs['remove_pre_avg_pool']:
+            self.fc.add_module("avgpool",nn.AvgPool2d(7).cuda())
+        else:
+            current_n_channels = current_n_channels*49
+        
+        self.fc.add_module("flatten",Flatten().cuda())
+        
+        for layer_i in range(configs['n_hidden_layers']): 
+            self.fc.add_module("drop_"+str(layer_i),nn.Dropout(p=configs['use_dropout_hidden_layers']).cuda())
+            if configs['use_batchnormalization_hidden_layers']:
+                self.fc.add_module("bn_"+str(layer_i),torch.nn.BatchNorm1d(current_n_channels).cuda())
+                
+            # On DGX, this next line, in the first iteration of the loop, is the one taking a long time (about 250s) in the .cuda() part.
+            # probably because of some incompatibility between Cuda 9.0 and pytorch 0.1.12
+            self.fc.add_module("linear_"+str(layer_i),nn.Linear(current_n_channels, configs['channels_hidden_layers'] ).cuda()) 
+            self.fc.add_module("relu_"+str(layer_i),nn.ReLU().cuda())
+            current_n_channels = configs['channels_hidden_layers']
+              
+        self.fc.add_module("linear_out", nn.Linear(current_n_channels , len(labels_columns)).cuda())
+        
+        self.fc.apply(weights_init)
+      
+    def forward(self, x):
+        x = self.fc(x)
+        output_kind_each_output = [(configs['individual_output_kind'][configs['get_labels_columns'][k]] if configs['get_labels_columns'][k] in list(configs['individual_output_kind'].keys()) else configs['network_output_kind']) for k in range(len(configs['get_labels_columns']))]
+        dic_output_kinds = {'linear':nn.Sequential(),'softplus':nn.Sequential(nn.Softplus().cuda()), 'sigmoid':nn.Sequential(nn.Sigmoid().cuda())}
+        #add exception when output_kind_each_output cotains element not in dic_output_kinds.keys()
+        unrecognized_kinds_of_outputs = list(set(output_kind_each_output).difference( dic_output_kinds.keys()) )
+        if len(unrecognized_kinds_of_outputs)>0:
+            raise_with_traceback(ValueError('There are output kinds in configs["individual_output_kind"] or configs["network_output_kind"] that are not one of: linear, sigmoid and softplus: ' + str(unrecognized_kinds_of_outputs)))
+        all_masked_outputs = []
+        for output_kind in list(dic_output_kinds.keys()):
+            mask = torch.autograd.Variable(torch.FloatTensor(np.repeat(np.expand_dims([(1.0 if output_kind_each_output[k] == output_kind else 0.0) for k in range(len(output_kind_each_output))], axis = 0), dic_output_kinds[output_kind](x).size()[0], axis=0)).cuda(), volatile = False)
+            all_masked_outputs.append((dic_output_kinds[output_kind](x)*mask).unsqueeze(2))
+        x = torch.cat(all_masked_outputs, 2)
+        x = torch.sum(x, 2).squeeze(2)
+        return x
 
 def get_model(num_ftrs):
     outmodel = ModelMoreInputs(num_ftrs)
+    #outmodel = outmodel.cuda()
     outmodel = torch.nn.DataParallel(outmodel).cuda()
     #print(list(outmodel.parameters()))
     #model = get_model_fc(num_ftrs)

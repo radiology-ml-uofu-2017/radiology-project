@@ -38,7 +38,10 @@ except:
 from configs import configs
 
 
-configs.load_predefined_set_of_configs('frozen_densenet') #'densenet', 'frozen_densenet'
+configs.load_predefined_set_of_configs('p12') #'densenet', 'frozen_densenet', 'p1'
+#configs['labels_to_use'] ='only_absolute'
+#configs.load_predefined_set_of_configs('densenet') 
+#configs['output_copd'] =False
 
 configs.open_get_block_set()
 
@@ -91,7 +94,11 @@ def run_epoch(loaders, model, criterion, optimizer, epoch=0, n_epochs=0, train=T
         output_var = model(torch.autograd.Variable(input.cuda(async=True, device = 0), volatile=(not train)))
 
         target_var = torch.autograd.Variable(target.cuda(async=True, device = 0), volatile=(not train))
-        loss = criterion(output_var, target_var)
+        
+        losses = []
+        for k in range(target.size()[1]):
+            losses.append(criterion[k](output_var[:,k], target_var[:,k]))
+        loss = sum(losses)
         
         output_var_fixed = output_var.data.cpu().numpy()
         target_var_fixed = target_var.data.cpu().numpy()
@@ -131,7 +138,7 @@ def run_epoch(loaders, model, criterion, optimizer, epoch=0, n_epochs=0, train=T
 def sigmoid_denormalization(np_array, ranges_labels):
     for i in range(np_array.shape[1]):
         col_name = labels_columns[i]
-        np_array[i,:] =  np_array[i,:]*ranges_labels[col_name][1]*configs['sigmoid_safety_constant'][col_name][1]+ranges_labels[col_name][0]*configs['sigmoid_safety_constant'][col_name][0]
+        np_array[:,i] =  np_array[:,i]*ranges_labels[col_name][1]*configs['sigmoid_safety_constant'][col_name][1]+ranges_labels[col_name][0]*configs['sigmoid_safety_constant'][col_name][0]
     return np_array
 
 def select_columns_one_table_after_merge(df, suffix, keep_columns=[]):
@@ -215,9 +222,25 @@ def load_training_pipeline(cases_to_use, all_images, all_labels, transformSequen
         
         logging.info('finished models. starting criterion')
         
-        criterion = configs['loss_function']
+        #defining what loss function should be used
+        losses_dict = {'l1':nn.L1Loss(size_average = True).cuda(), 
+          'l2':nn.MSELoss(size_average = True).cuda(), 
+          'smoothl1':nn.SmoothL1Loss(size_average = True).cuda(), 
+          'bce':nn.BCELoss(size_average = True).cuda()}
 
-        optimizer = optim.Adam( model.parameters(), lr=configs['initial_lr'] , weight_decay=configs['l2_reg'])
+        criterion = [(losses_dict[configs['individual_kind_of_loss'][configs['get_labels_columns'][k]]] if configs['get_labels_columns'][k] in list(configs['individual_kind_of_loss'].keys()) else losses_dict[configs['kind_of_loss']]) for k in range(len(configs['get_labels_columns']))]
+        
+        '''
+        optimizer = optim.Adam( [
+          {'params':model.module.fc.parameters(), 'lr':configs['initial_lr_fc'], 'weight_decay':configs['l2_reg_fc']}, 
+          {'params':model.module.cnn.parameters(), 'lr':configs['initial_lr_cnn'], 'weight_decay':configs['l2_reg_cnn']}
+          ], lr=configs['initial_lr_fc'] , weight_decay=configs['l2_reg_fc'])
+        '''
+        optimizer = optim.Adam( [
+          {'params':model.module.fc.parameters(), 'lr':configs['initial_lr_fc'], 'weight_decay':configs['l2_reg_fc']}, 
+          {'params':model.module.cnn.parameters(), 'lr':configs['initial_lr_cnn'], 'weight_decay':configs['l2_reg_cnn']}
+          ], lr=configs['initial_lr_fc'] , weight_decay=configs['l2_reg_fc'])
+                
         scheduler = utils.ReduceLROnPlateau(optimizer, factor = 0.1, patience = 5, mode = 'min', verbose = True)
         models = models + [model]
         criterions = criterions + [criterion]

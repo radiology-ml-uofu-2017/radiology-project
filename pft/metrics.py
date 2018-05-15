@@ -5,6 +5,55 @@ import matplotlib.pyplot as plt
 from configs import configs
 import logging
 import sklearn.metrics
+import scipy.stats
+
+# defining what variables are going to be ploted (plot_columns) and how they are calculated
+# using the variables present in labels_to_use
+def absolutes_and_important_ratios_plot_calc(values, name):
+    if name in configs['get_labels_columns']:
+        return get_plot_value(values, name)
+    elif name=='fev1_ratio':
+        return get_plot_value(values, 'fev1_predrug')/get_plot_value(values, 'fev1_pred')
+    elif name=='fev1fvc_predrug':
+        return get_plot_value(values, 'fev1_predrug')/get_plot_value(values, 'fvc_predrug')
+    else:
+        raise_with_traceback(ValueError(name + ' is not a valid name value for function absolutes_and_important_ratios_plot_calc'))
+      
+def get_plot_value(values, name):
+    return values[:,configs['get_labels_columns'].index(name)]
+
+def plot_results(y_corr, y_pred, train_string):
+    markers = ['b.','g.', 'r.', 'c.', 'm.', 'y.', 'k.', 'b>', 'g>','r>']
+    prettify_name = {'fvc_pred':'Predicted FVC', 'fev1_pred':'Predicted FEV1', 'fev1fvc_pred':'Predicted FEV1/FVC', 
+                     'fev1_predrug':'Pre-drug FEV1', 'fvc_predrug':'Pre-drug FVC', 'fev1fvc_predrug':'Pre-drug FEV1/FVC', 
+                     'fev1_ratio':'Predicted/Pre-drug FEV1', 'fvc_ratio':'Predicted/Pre-drug FVC', 'fev1fvc_ratio':'Predicted/Pre-drug FEV1/FVC'}
+    
+    for i, plot_list in enumerate(configs['pft_plot_columns']):
+        plot_var_for_legend = []
+        name_var_for_legend = []
+        for k in range(len(plot_list)):
+            name = plot_list[k]
+            this_plot, = plt.plot(absolutes_and_important_ratios_plot_calc(y_corr, name),absolutes_and_important_ratios_plot_calc(y_pred, name), markers[k])
+            plot_var_for_legend.append(this_plot)
+            name_var_for_legend.append(prettify_name[name])
+        plt.legend(plot_var_for_legend, name_var_for_legend,
+                        scatterpoints=1,
+                        loc='best',
+                        ncol=2,
+                        fontsize=8)
+        ax = plt.gca()
+        ylim = ax.get_ylim()
+        xlim = ax.get_xlim()
+        final_axis = (min(ylim[0],xlim[0]), max(ylim[1],xlim[1]))
+        ax.set_ylim(final_axis)
+        ax.set_xlim(final_axis)
+        plt.plot([final_axis[0], final_axis[1]], [final_axis[0], final_axis[1]], 'k-', lw=1)
+        plt.xlabel('Groundtruth', fontsize=10)
+        plt.ylabel('Predicted', fontsize=10)
+        plt.savefig('plots/' + train_string + '_' + (str(i) if len(plot_list)>1 else plot_list[0]) + '_' + configs['output_image_name'])
+        plt.clf()
+        plt.cla()
+        plt.close()
 
 def perf_measure(y_actual, y_hat):
     TP = 0
@@ -25,7 +74,8 @@ def get_precision_recall_from_dictionary(d):
     precision = d['tp']/float(d['tp']+d['fp'])
     recall = d['tp']/float(d['tp']+d['fn'])
     f1score = 2*precision*recall/(precision+recall)
-    return {'precision':precision, 'recall':recall, 'f1score':f1score }
+    accuracy = (d['tp']+d['tn'])/float(d['tp']+d['fp']+d['fn']+d['tn'])
+    return {'precision':precision, 'recall':recall, 'f1score':f1score, 'accuracy': accuracy}
   
 def r2(y_corr, y_pred):
     y_corr_mean = np.mean(y_corr)
@@ -34,66 +84,46 @@ def r2(y_corr, y_pred):
     return 1-ssres/sstot
 
 def get_copd_diagnose(fev1fvc_predrug):
-    if fev1fvc_predrug>= 0.7:
-        return 0
-    return 1
+    return (fev1fvc_predrug< 0.7)*1
     
 def get_gold(fev1_ratio, fev1fvc_predrug):
-    if fev1fvc_predrug>= 0.7:
-        return 0
-    if fev1_ratio>=0.8:
-        return 1
-    if fev1_ratio>=0.5:
-        return 2
-    if fev1_ratio>=0.3:
-        return 3
-    return 4
-  
+    return (fev1fvc_predrug<0.7)*(1+(fev1_ratio<0.8)+(fev1_ratio<0.5)+(fev1_ratio<0.3))
+
+def get_accuracies(y_corr, y_pred):
+    accuracies = {}
+    accuracies['roc'] = sklearn.metrics.average_precision_score(y_true = y_corr, y_score = y_pred)
+    perfs = perf_measure(y_actual = y_corr, y_hat = (y_pred>0.5)*1)
+    accuracies['perfs'] = perfs
+    accuracies['scores'] = get_precision_recall_from_dictionary(perfs)
+    accuracies['accuracy'] = (perfs['tn']+perfs['tp'])/float(perfs['tn']+perfs['tn']+perfs['fp']+perfs['fn'])
+    return accuracies
+      
 def report_final_results(y_corr , y_pred, train):
     if train:
         train_string = 'train'
     else:
         train_string = 'val'
-    markers = ['b.','g.', 'r.', 'c.', 'm.', 'y.', 'k.', 'b>', 'g>','r>']
-    plot_var_for_legend = []
-    
-    for k in range(len(configs['pft_plot_columns'])):
-        this_plot, = plt.plot(configs['pft_plot_function'](y_corr, k),configs['pft_plot_function'](y_pred, k), markers[k])
-        #plot_var_for_legend.append(this_plot)
-        plot_var_for_legend=[this_plot]
-    
-        plt.legend(plot_var_for_legend, [configs['pft_plot_columns'][k]],
-                    scatterpoints=1,
-                    loc='best',
-                    ncol=2,
-                    fontsize=8)
+    logging.info('metrics for ' + train_string + ' set:' )
         
-        ax = plt.gca()
-        ylim = ax.get_ylim()
-        xlim = ax.get_xlim()
-        final_axis = (min(ylim[0],xlim[0]), max(ylim[1],xlim[1]))
-        ax.set_ylim(final_axis)
-        ax.set_xlim(final_axis)
-        plt.plot([final_axis[0], final_axis[1]], [final_axis[0], final_axis[1]], 'k-', lw=1)
-        plt.xlabel('Groundtruth', fontsize=10)
-        plt.ylabel('Predicted', fontsize=10)
-        plt.savefig('plots/' + train_string + '_' +configs['pft_plot_columns'][k]+ '_' + configs['output_image_name'])
-        plt.clf()
-        plt.cla()
-        plt.close()
-    
+    plot_results(y_corr, y_pred, train_string)
+        
     r2s = {}
-    for k in range(len(configs['pft_plot_columns'])):
-        r2s[configs['pft_plot_columns'][k]] = r2(y_corr = configs['pft_plot_function'](y_corr,k), y_pred = configs['pft_plot_function'](y_pred,k))
-        #print('sklearn: ' + str(sklearn.metrics.r2_score(y_true = configs['pft_plot_function'](y_corr,k), y_pred = configs['pft_plot_function'](y_pred,k))))
-        #print('numpy: ' + str(r2s[configs['pft_plot_columns'][k]]))
-    logging.info('r2: ' + str(r2s))
+    correlations = {}
+    output_variables = list(set(sum(configs['pft_plot_columns'],[])))
     accuracies = {}
-    for k in range(len(configs['get_labels_columns_copd'])):
-        accuracies[configs['get_labels_columns_copd'][k]] = {}
-        accuracies[configs['get_labels_columns_copd'][k]]['roc'] = sklearn.metrics.average_precision_score(y_true = y_corr[:,-k], y_score = y_pred[:,-k])
-        perfs = perf_measure(y_actual = y_corr[:,-k], y_hat = (y_pred[:,-k]>0.5)*1)
-        accuracies[configs['get_labels_columns_copd'][k]]['perfs'] = perfs
-        accuracies[configs['get_labels_columns_copd'][k]]['scores'] = get_precision_recall_from_dictionary(perfs)
-        accuracies[configs['get_labels_columns_copd'][k]]['accuracy'] = (perfs['tn']+perfs['tp'])/(perfs['tn']+perfs['tn']+perfs['fp']+perfs['fn'])
-    logging.info('accuracy: : ' + str(accuracies))
+    for k in range(len(output_variables)):
+        name = output_variables[k]
+        this_y_corr = absolutes_and_important_ratios_plot_calc(y_corr, name)
+        this_y_pred = absolutes_and_important_ratios_plot_calc(y_pred, name)
+        r2s[name] = r2(y_corr = this_y_corr, y_pred = this_y_pred)
+        #print('sklearn: ' + str(sklearn.metrics.r2_score(y_true = configs['pft_plot_function'](y_corr,k), y_pred = configs['pft_plot_function'](y_pred,k))))
+        #print('numpy: ' + str(r2s[name]))
+        pearson, pvalue = scipy.stats.pearsonr(this_y_corr, this_y_pred)
+        correlations[name] = {'pearson':pearson, 'pvalue':pvalue}
+        if name == 'fev1fvc_predrug':
+            accuracies['copd_from_pft'] = get_accuracies(get_copd_diagnose(this_y_corr),  get_copd_diagnose(this_y_pred)) 
+    logging.info('r2: ' + str(r2s))
+    logging.info('correlation statistical test: ' + str(correlations))
+    if len(configs['get_labels_columns_copd'])>0:
+        accuracies[configs['get_labels_columns_copd'][0]] = get_accuracies(absolutes_and_important_ratios_plot_calc(y_corr, 'copd') ,  absolutes_and_important_ratios_plot_calc(y_pred, 'copd')) 
+    logging.info('accuracy: ' + str(accuracies))
