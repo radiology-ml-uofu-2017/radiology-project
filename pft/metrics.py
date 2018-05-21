@@ -9,31 +9,33 @@ import scipy.stats
 
 # defining what variables are going to be ploted (plot_columns) and how they are calculated
 # using the variables present in labels_to_use
-def absolutes_and_important_ratios_plot_calc(values, name):
+def absolutes_and_important_ratios_plot_calc(values, all_true_values, name):
     if name in configs['get_labels_columns']:
-        return get_plot_value(values, name)
+        return get_plot_value(values, all_true_values, name)
     elif name=='fev1_ratio':
-        return get_plot_value(values, 'fev1_predrug')/get_plot_value(values, 'fev1_pred')
+        return get_plot_value(values, all_true_values, 'fev1_predrug')/get_plot_value(values, all_true_values, 'fev1_pred')
     elif name=='fev1fvc_predrug':
-        return get_plot_value(values, 'fev1_predrug')/get_plot_value(values, 'fvc_predrug')
+        return get_plot_value(values, all_true_values, 'fev1_predrug')/get_plot_value(values, all_true_values,'fvc_predrug')
     else:
         raise_with_traceback(ValueError(name + ' is not a valid name value for function absolutes_and_important_ratios_plot_calc'))
       
-def get_plot_value(values, name):
+def get_plot_value(values, all_true_values, name):
+    if configs['use_true_predicted'] and name.endswith('_pred'):
+        return all_true_values[:,configs['all_input_columns'].index(name)]
     return values[:,configs['get_labels_columns'].index(name)]
 
-def plot_results(y_corr, y_pred, train_string):
+def plot_results(y_corr, y_pred, y_corr_all, train_string):
     markers = ['b.','g.', 'r.', 'c.', 'm.', 'y.', 'k.', 'b>', 'g>','r>']
     prettify_name = {'fvc_pred':'Predicted FVC', 'fev1_pred':'Predicted FEV1', 'fev1fvc_pred':'Predicted FEV1/FVC', 
                      'fev1_predrug':'Pre-drug FEV1', 'fvc_predrug':'Pre-drug FVC', 'fev1fvc_predrug':'Pre-drug FEV1/FVC', 
-                     'fev1_ratio':'Predicted/Pre-drug FEV1', 'fvc_ratio':'Predicted/Pre-drug FVC', 'fev1fvc_ratio':'Predicted/Pre-drug FEV1/FVC'}
+                     'fev1_ratio':'Pre-drug/Predicted FEV1', 'fvc_ratio':'Pre-drug/Predicted FVC', 'fev1fvc_ratio':'Pre-drug/Predicted FEV1/FVC'}
     
     for i, plot_list in enumerate(configs['pft_plot_columns']):
         plot_var_for_legend = []
         name_var_for_legend = []
         for k in range(len(plot_list)):
             name = plot_list[k]
-            this_plot, = plt.plot(absolutes_and_important_ratios_plot_calc(y_corr, name),absolutes_and_important_ratios_plot_calc(y_pred, name), markers[k])
+            this_plot, = plt.plot(absolutes_and_important_ratios_plot_calc(y_corr, y_corr_all, name),absolutes_and_important_ratios_plot_calc(y_pred, y_corr_all, name), markers[k])
             plot_var_for_legend.append(this_plot)
             name_var_for_legend.append(prettify_name[name])
         plt.legend(plot_var_for_legend, name_var_for_legend,
@@ -95,17 +97,19 @@ def get_accuracies(y_corr, y_pred):
     perfs = perf_measure(y_actual = y_corr, y_hat = (y_pred>0.5)*1)
     accuracies['perfs'] = perfs
     accuracies['scores'] = get_precision_recall_from_dictionary(perfs)
-    accuracies['accuracy'] = (perfs['tn']+perfs['tp'])/float(perfs['tn']+perfs['tn']+perfs['fp']+perfs['fn'])
+    accuracies['accuracy'] = (perfs['tn']+perfs['tp'])/float(perfs['tn']+perfs['tp']+perfs['fp']+perfs['fn'])
     return accuracies
-      
-def report_final_results(y_corr , y_pred, train):
+
+def report_final_results(y_corr , y_pred, y_corr_all, train):
     if train:
         train_string = 'train'
     else:
         train_string = 'val'
     logging.info('metrics for ' + train_string + ' set:' )
+    
+    y_corr, y_pred, y_corr_all = configs['pre_transform_labels'].apply_inverse_transform((y_corr, y_pred, y_corr_all))
         
-    plot_results(y_corr, y_pred, train_string)
+    plot_results(y_corr, y_pred, y_corr_all, train_string)
         
     r2s = {}
     correlations = {}
@@ -113,8 +117,8 @@ def report_final_results(y_corr , y_pred, train):
     accuracies = {}
     for k in range(len(output_variables)):
         name = output_variables[k]
-        this_y_corr = absolutes_and_important_ratios_plot_calc(y_corr, name)
-        this_y_pred = absolutes_and_important_ratios_plot_calc(y_pred, name)
+        this_y_corr = absolutes_and_important_ratios_plot_calc(y_corr, y_corr_all, name)
+        this_y_pred = absolutes_and_important_ratios_plot_calc(y_pred, y_corr_all, name)
         r2s[name] = r2(y_corr = this_y_corr, y_pred = this_y_pred)
         #print('sklearn: ' + str(sklearn.metrics.r2_score(y_true = configs['pft_plot_function'](y_corr,k), y_pred = configs['pft_plot_function'](y_pred,k))))
         #print('numpy: ' + str(r2s[name]))
@@ -125,5 +129,5 @@ def report_final_results(y_corr , y_pred, train):
     logging.info('r2: ' + str(r2s))
     logging.info('correlation statistical test: ' + str(correlations))
     if len(configs['get_labels_columns_copd'])>0:
-        accuracies[configs['get_labels_columns_copd'][0]] = get_accuracies(absolutes_and_important_ratios_plot_calc(y_corr, 'copd') ,  absolutes_and_important_ratios_plot_calc(y_pred, 'copd')) 
+        accuracies[configs['get_labels_columns_copd'][0]] = get_accuracies(absolutes_and_important_ratios_plot_calc(y_corr, y_corr_all, 'copd') ,  absolutes_and_important_ratios_plot_calc(y_pred, y_corr_all, 'copd')) 
     logging.info('accuracy: ' + str(accuracies))

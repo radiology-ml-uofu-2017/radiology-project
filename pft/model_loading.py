@@ -128,7 +128,7 @@ class ModelFCPart(nn.Module):
       
     def forward(self, x):
         x = self.fc(x)
-        output_kind_each_output = [(configs['individual_output_kind'][configs['get_labels_columns'][k]] if configs['get_labels_columns'][k] in list(configs['individual_output_kind'].keys()) else configs['network_output_kind']) for k in range(len(configs['get_labels_columns']))]
+        output_kind_each_output = [ configs['get_individual_output_kind'][name] for name in configs['get_labels_columns']]
         dic_output_kinds = {'linear':nn.Sequential(),'softplus':nn.Sequential(nn.Softplus().cuda()), 'sigmoid':nn.Sequential(nn.Sigmoid().cuda())}
         #add exception when output_kind_each_output cotains element not in dic_output_kinds.keys()
         unrecognized_kinds_of_outputs = list(set(output_kind_each_output).difference( dic_output_kinds.keys()) )

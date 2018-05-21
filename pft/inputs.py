@@ -76,7 +76,7 @@ def get_name_pickle_file():
         size_all_images = '7_7'
     else:
         size_all_images = '1_1'
-    return 'all_images_' +  size_all_images + '_prot2.pkl'
+    return '/home/sci/ricbl/Documents/projects/radiology-project/pft/all_images_' +  size_all_images + '_prot2.pkl'
   
 class DatasetGenerator(Dataset):
     def __init__ (self, pathDatasetFile, transform = None):
@@ -135,9 +135,10 @@ class DatasetGenerator(Dataset):
         #plt.imshow(b)
         #plt.savefig('test.png')
         imageLabel= torch.FloatTensor(self.listImage[0][labels_columns].iloc[index])
+        imageAllColumns= torch.FloatTensor(self.listImage[0][configs['all_input_columns']].iloc[index])
         #self.transform = transforms.ToTensor()
         
-        return imageData, imageLabel
+        return imageData, imageLabel, imageAllColumns
         
     #-------------------------------------------------------------------------------- 
     
@@ -153,36 +154,13 @@ def get_labels():
     
     all_labels = pd.read_csv(file_with_labels)
     if not configs['use_set_29']:
-        all_labels.rename(index=str, columns={"Subject_Global_ID": "subjectid", 
-                                              "CRStudy_Local_ID": "crstudy",
-                                              "PFTExam_Local_ID": "pftid",
-                                              'Predicted FVC':'fvc_pred',
-                                              'Predicted FEV1':'fev1_pred',
-                                              'Predicted FEV1/FVC':'fev1fvc_pred',
-                                              'Pre-Drug FVC':'fvc_predrug',
-                                              'Pre-Drug FEV1':'fev1_predrug',
-                                              'Pre-Drug FEV1/FVC':'fev1fvc_predrug',
-                                              'Pre-%Pred FVC':'fvc_ratio',
-                                              'Pre-%Pred FEV1':'fev1_ratio',
-                                              'Pre-%Pred FEV1/FVC':'fev1fvc_ratio',
-                                              'TOBACCO_PAK_PER_DY':'packs_per_day',
-                                              'TOBACCO_USED_YEARS':'years_of_tobacco',
-                                              'COPD':'copd'}, inplace = True)
+        all_labels.rename(index=str, columns=configs['columns_translations'], inplace = True)
     
     all_labels.dropna(subset=['fvc_predrug'], inplace=True)
 
     all_labels[percentage_labels] = all_labels[percentage_labels] /100.
-    ranges_labels = {}
-    for label in labels_columns:
-        x = np.array(all_labels[label])
-        ranges_labels[label] = [np.amin(x), np.amax(x)]
-    
-    if configs['network_output_kind']=='sigmoid':
-        all_labels[labels_columns] = all_labels[labels_columns].apply(sigmoid_normalization(ranges_labels))
-    
-    if configs['use_log_transformation']:
-        all_labels[labels_columns] = all_labels[labels_columns].apply(np.log)
-    return all_labels, ranges_labels
+    all_labels = configs['pre_transform_labels'].apply_transform(all_labels)
+    return all_labels
 
 def count_unique_images_and_pairs(images_to_use, all_examples):
     images_to_use['old_index_pa'] = images_to_use.index
@@ -207,6 +185,7 @@ def get_all_images():
     if (not configs['load_image_features_from_file']) or configs['trainable_densenet']:
         normalize = transforms.Normalize([0.485, 0.456, 0.406],
                                             [0.229, 0.224, 0.225])
+        
         list_pretransforms =[     image_preprocessing.Convert16BitToFloat(),
                   image_preprocessing.CropBiggestCenteredInscribedSquare(),
                   transforms.Resize(size=(224)), 
@@ -258,9 +237,3 @@ def get_images():
         transformSequence = transforms.Compose([image_preprocessing.RandomHorizontalFlipNumpy()])
         
     return sets_of_images, transformSequence, num_ftrs
-
-def sigmoid_normalization(ranges_labels):
-    def f(col):
-        return (col-ranges_labels[col.name][0]*configs['sigmoid_safety_constant'][col.name][0])/ranges_labels[col.name][1]/configs['sigmoid_safety_constant'][col.name][1]
-    print(f)
-    return f

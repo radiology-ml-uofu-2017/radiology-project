@@ -38,7 +38,12 @@ except:
 from configs import configs
 
 
-configs.load_predefined_set_of_configs('p12') #'densenet', 'frozen_densenet', 'p1'
+configs.load_predefined_set_of_configs('p1') #'densenet', 'frozen_densenet', 'p1'
+#configs['pre_transformation'] = 'boxcox'
+#configs['N_EPOCHS'] = 1
+#configs['use_lateral']= True
+#configs['kind_of_loss']='l1'
+#configs['network_output_kind']='linear'
 #configs['labels_to_use'] ='only_absolute'
 #configs.load_predefined_set_of_configs('densenet') 
 #configs['output_copd'] =False
@@ -72,7 +77,7 @@ if configs['machine_to_use'] == 'titan':
         raise_with_traceback(ValueError('You should set Cuda Visible Devices (-c or --cvd) when using titan'))
     os.environ['CUDA_VISIBLE_DEVICES'] = args['cvd']
 
-def run_epoch(loaders, model, criterion, optimizer, epoch=0, n_epochs=0, train=True, ranges_labels = None):
+def run_epoch(loaders, model, criterion, optimizer, epoch=0, n_epochs=0, train=True):
     # modified from https://github.com/gpleiss/temperature_scaling
     time_meter = utils.Meter(name='Time', cum=True)
     loss_meter = utils.Meter(name='Loss', cum=False)
@@ -84,9 +89,9 @@ def run_epoch(loaders, model, criterion, optimizer, epoch=0, n_epochs=0, train=T
     end = time.time()
     lossMean = 0.0 
     lossValNorm = 0.0
-    y_corr = np.empty([0,len(labels_columns)])
-    y_pred = np.empty([0,len(labels_columns)])
-    for i, (input, target) in enumerate(loaders):
+    y_corr, y_pred, y_corr_all = (np.empty([0,x]) for x in (len(labels_columns),len(labels_columns),len(configs['all_input_columns'])))
+
+    for i, (input, target, column_values) in enumerate(loaders):
         if train:
             optimizer.zero_grad()
         # Forward pass
@@ -100,18 +105,12 @@ def run_epoch(loaders, model, criterion, optimizer, epoch=0, n_epochs=0, train=T
             losses.append(criterion[k](output_var[:,k], target_var[:,k]))
         loss = sum(losses)
         
+        #output_var_fixed, target_var_fixed = (x.data.cpu().numpy() for x in (output_var, target_var))
         output_var_fixed = output_var.data.cpu().numpy()
-        target_var_fixed = target_var.data.cpu().numpy()
+        target_var_fixed = target.numpy()
+        all_target_var_fixed = column_values.numpy()
         
-        if configs['use_log_transformation']:
-            output_var_fixed = np.exp(output_var_fixed)
-            target_var_fixed = np.exp(target_var_fixed)
-        if configs['network_output_kind']=='sigmoid':
-            output_var_fixed = sigmoid_denormalization(output_var_fixed, ranges_labels)
-            target_var_fixed = sigmoid_denormalization(target_var_fixed, ranges_labels)
-            
-        y_corr = np.concatenate((y_corr, target_var_fixed), axis = 0)
-        y_pred = np.concatenate((y_pred, output_var_fixed), axis = 0)
+        y_corr, y_pred, y_corr_all = (np.concatenate(x, axis = 0) for x in ((y_corr, target_var_fixed), (y_pred, output_var_fixed), (y_corr_all, all_target_var_fixed)))
         
         # Backward pass
         if train:
@@ -133,13 +132,7 @@ def run_epoch(loaders, model, criterion, optimizer, epoch=0, n_epochs=0, train=T
         lossMean += this_batch_size*loss.data[0]
         lossValNorm += this_batch_size
     #logging.info('oi1 ' + str(time.time() - start))
-    return time_meter.value(), loss_meter.value(), np.atleast_1d(lossMean/lossValNorm), y_corr, y_pred
-
-def sigmoid_denormalization(np_array, ranges_labels):
-    for i in range(np_array.shape[1]):
-        col_name = labels_columns[i]
-        np_array[:,i] =  np_array[:,i]*ranges_labels[col_name][1]*configs['sigmoid_safety_constant'][col_name][1]+ranges_labels[col_name][0]*configs['sigmoid_safety_constant'][col_name][0]
-    return np_array
+    return time_meter.value(), loss_meter.value(), np.atleast_1d(lossMean/lossValNorm), y_corr, y_pred, y_corr_all
 
 def select_columns_one_table_after_merge(df, suffix, keep_columns=[]):
     to_select = [x for x in df if x.endswith(suffix)]+keep_columns
@@ -228,8 +221,8 @@ def load_training_pipeline(cases_to_use, all_images, all_labels, transformSequen
           'smoothl1':nn.SmoothL1Loss(size_average = True).cuda(), 
           'bce':nn.BCELoss(size_average = True).cuda()}
 
-        criterion = [(losses_dict[configs['individual_kind_of_loss'][configs['get_labels_columns'][k]]] if configs['get_labels_columns'][k] in list(configs['individual_kind_of_loss'].keys()) else losses_dict[configs['kind_of_loss']]) for k in range(len(configs['get_labels_columns']))]
-        
+        criterion = [losses_dict[configs['get_individual_kind_of_loss'][k]] for k in configs['get_labels_columns']]
+
         '''
         optimizer = optim.Adam( [
           {'params':model.module.fc.parameters(), 'lr':configs['initial_lr_fc'], 'weight_decay':configs['l2_reg_fc']}, 
@@ -249,18 +242,26 @@ def load_training_pipeline(cases_to_use, all_images, all_labels, transformSequen
         train_loaders = train_loaders + [train_loader]
         test_loaders = test_loaders + [test_loader]
     return models, criterions, optimizers, schedulers, train_loaders, test_loaders
-    
-def train(models, criterions, optimizers, schedulers, train_loaders, test_loaders, ranges_labels):    # Train model
+
+def concat_with_expansion(x,y, axis):
+    return np.concatenate((x, np.expand_dims(y, axis = 2)), axis = axis)
+              
+def train(models, criterions, optimizers, schedulers, train_loaders, test_loaders):    # Train model
     n_epochs = configs['N_EPOCHS']
     logging.info('starting training')
     
     training_range = configs['get_training_range']
     
-    ys_corr_train = np.empty([np.sum([len(x[0]) for x in train_loaders[0]]),len(labels_columns),0])
-    ys_pred_train = np.empty([np.sum([len(x[0]) for x in train_loaders[0]]),len(labels_columns),0])
-    ys_corr_test = np.empty([np.sum([len(x[0]) for x in test_loaders[0]]),len(labels_columns),0])
-    ys_pred_test = np.empty([np.sum([len(x[0]) for x in test_loaders[0]]),len(labels_columns),0])
+    train_dataset_size, test_dataset_size  = (np.sum([len(x[0]) for x in k[0]]) for k in (train_loaders, test_loaders))
+    ys_corr_train, ys_pred_train, ys_corr_all_train, ys_corr_test, ys_pred_test, ys_corr_all_test = (np.empty([x,len(labels_columns),0]) for x in (train_dataset_size,train_dataset_size,train_dataset_size, test_dataset_size,test_dataset_size, test_dataset_size))
     
+    if configs['training_pipeline']=='simple':
+        concatenate_funcation = lambda x,y: y
+    elif configs['training_pipeline']=='one_vs_all':
+        concatenate_funcation = lambda x,y: concat_with_expansion(x,y, 0)
+    elif configs['training_pipeline']=='ensemble':
+        concatenate_funcation = lambda x,y: concat_with_expansion(x,y, 2)
+                
     for epoch in range(1, n_epochs + 1):    
 
         all_val_losses =np.array([])
@@ -274,56 +275,41 @@ def train(models, criterions, optimizers, schedulers, train_loaders, test_loader
             train_loader = train_loaders[i]
             test_loader = test_loaders[i]
         
-            _, _, loss, y_corr_train, y_pred_train = run_epoch(
+            _, _, loss, y_corr_train, y_pred_train, y_corr_all_train = run_epoch(
                 loaders=train_loader,
                 model=model,
                 criterion=criterion,
                 optimizer=optimizer,
                 epoch=epoch,
                 n_epochs=n_epochs,
-                train=True,
-                ranges_labels = ranges_labels
+                train=True
                 ) 
             
             all_train_losses = np.concatenate((all_train_losses, loss), axis=0)
-            _, _, loss, y_corr_test, y_pred_test = run_epoch(
+            _, _, loss, y_corr_test, y_pred_test, y_corr_all_test = run_epoch(
                 loaders=test_loader,
                 model=model,
                 criterion=criterion,
                 optimizer=None,
                 epoch=epoch,
                 n_epochs=n_epochs,
-                train=False,
-                ranges_labels = ranges_labels)
+                train=False
+                )
             if configs['use_lr_scheduler']:
                 schedulers[i].step(loss)
             all_val_losses = np.concatenate((all_val_losses, loss), axis=0)
             
-            if configs['training_pipeline']=='simple':
-                ys_corr_train = y_corr_train
-                ys_pred_train = y_pred_train
-                ys_corr_test = y_corr_test
-                ys_pred_test = y_pred_test
-            elif configs['training_pipeline']=='one_vs_all':
-                ys_corr_train = np.concatenate((ys_corr_train, np.expand_dims(y_corr_train, axis = 2)), axis = 0)
-                ys_pred_train = np.concatenate((ys_pred_train, np.expand_dims(y_pred_train, axis = 2)), axis = 0)
-                ys_corr_test = np.concatenate((ys_corr_test, np.expand_dims(y_corr_test, axis = 2)), axis = 0)
-                ys_pred_test = np.concatenate((ys_pred_test, np.expand_dims(y_pred_test, axis = 2)), axis = 0)
-            elif configs['training_pipeline']=='ensemble':
-                ys_corr_train = np.concatenate((ys_corr_train, np.expand_dims(y_corr_train, axis = 2)), axis = 2)
-                ys_pred_train = np.concatenate((ys_pred_train, np.expand_dims(y_pred_train, axis = 2)), axis = 2)
-                ys_corr_test = np.concatenate((ys_corr_test, np.expand_dims(y_corr_test, axis = 2)), axis = 2)
-                ys_pred_test = np.concatenate((ys_pred_test, np.expand_dims(y_pred_test, axis = 2)), axis = 2)
+            ys_corr_train, ys_pred_train, ys_corr_all_train, ys_corr_test, ys_pred_test, ys_corr_all_test = \
+                  (concatenate_funcation(x,y) for x,y in \
+                    ((ys_corr_train,y_corr_train),(ys_pred_train,y_pred_train),(ys_corr_all_train,y_corr_all_train), (ys_corr_test,y_corr_test),(ys_pred_test,y_pred_test), (ys_corr_all_test,y_corr_all_test)))
                 
         if epoch==n_epochs:
             if configs['training_pipeline']=='ensemble':
-                ys_corr_train = np.mean(ys_corr_train, axis = 1)
-                ys_pred_train = np.mean(ys_pred_train, axis = 1)
-                ys_corr_test = np.mean(ys_corr_test, axis = 1)
-                ys_pred_test = np.mean(ys_pred_test, axis = 1)
+                ys_corr_train, ys_pred_train, ys_corr_all_train, ys_corr_test, ys_pred_test, ys_corr_all_test = \
+                  ( np.mean(x, axis = 1) for x in (ys_corr_train,ys_pred_train,ys_corr_all_train, ys_corr_test,ys_pred_test, ys_corr_all_test))
                 
-            metrics.report_final_results(ys_corr_train , ys_pred_train, train = True)
-            metrics.report_final_results(ys_corr_test , ys_pred_test, train = False)
+            metrics.report_final_results(ys_corr_train , ys_pred_train, ys_corr_all_train, train = True)
+            metrics.report_final_results(ys_corr_test , ys_pred_test, ys_corr_all_test, train = False)
             
         logging.info('Train loss ' + str(epoch) + '/' + str(n_epochs) + ': ' +str(np.average(all_train_losses)))
         logging.info('Val loss ' + str(epoch) + '/' + str(n_epochs) + ': '+str(np.average(all_val_losses)))
@@ -347,13 +333,13 @@ def main():
     
     logging.info('ended feature loading. started label loading')
     
-    all_labels, ranges_labels = inputs.get_labels()
+    all_labels = inputs.get_labels()
     
     logging.info('ended label loading')
     cases_to_use = merge_images_and_labels(all_images, all_labels)
     
     models, criterions, optimizers, schedulers, train_loaders, test_loaders = load_training_pipeline(cases_to_use, all_images, all_labels, transformSequence, num_ftrs)
-    train(models, criterions, optimizers, schedulers, train_loaders, test_loaders, ranges_labels)
+    train(models, criterions, optimizers, schedulers, train_loaders, test_loaders)
     
 if __name__ == '__main__':
     main()
