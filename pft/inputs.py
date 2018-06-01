@@ -9,6 +9,7 @@ import h5py
 import torchvision.transforms as transforms
 import image_preprocessing
 import numpy as np
+from PIL import Image
 
 try:
     import cPickle as pickle
@@ -26,6 +27,38 @@ def write_filenames():
     command = 'find ' + pathPngs + ' -type f -name "*.png" > ' + pathFileTrain
     os.system(command)
 
+def read_filename(line):
+    thisimage = {}
+    lineItems = line.split()
+    thisimage['filepath'] = lineItems[0]
+    splitted_filepath = thisimage['filepath'].replace('\\','/').split("/")
+    splitted_ids = splitted_filepath[-1].replace('-','_').replace('.','_').split('_')
+    thisimage['subjectid'] = int(splitted_ids[1])
+    thisimage['crstudy'] = int(splitted_ids[3])
+    thisimage['scanid'] = int(splitted_ids[5])
+    
+    position = splitted_ids[-2].upper()
+    if 'LAT' in position:
+        position = 'LAT'
+    elif 'PA' in position:
+        position = 'PA'
+    elif 'AP' in position:
+        position = 'AP'
+    elif 'LARGE' in position:
+        return None
+    elif 'SUPINE' in position:
+        return None
+    elif 'CHEST' in position:
+        return None
+    elif 'P' == position and  splitted_ids[-3].upper() == 'A':
+        position = 'AP'
+    elif 'PORTRAIT' in position:
+        return None
+    else:
+        raise_with_traceback(ValueError('Unknown position: '+position + ', for file: ' +  lineItems[0]))
+    thisimage['position'] = position
+    return thisimage
+    
 def read_filenames(pathFileTrain):
     listImage = []
     fileDescriptor = open(pathFileTrain, "r")
@@ -36,42 +69,18 @@ def read_filenames(pathFileTrain):
 
       #--- if not empty
       if line:
-          thisimage = {}
-          lineItems = line.split()
-          thisimage['filepath'] = lineItems[0]
-          splitted_filepath = thisimage['filepath'].replace('\\','/').split("/")
-          splitted_ids = splitted_filepath[-1].replace('-','_').replace('.','_').split('_')
-          thisimage['subjectid'] = int(splitted_ids[1])
-          thisimage['crstudy'] = int(splitted_ids[3])
-          thisimage['scanid'] = int(splitted_ids[5])
-          
-          position = splitted_ids[-2].upper()
-          if 'LAT' in position:
-              position = 'LAT'
-          elif 'PA' in position:
-              position = 'PA'
-          elif 'AP' in position:
-              position = 'AP'
-          elif 'LARGE' in position:
-              continue
-          elif 'SUPINE' in position:
-              continue
-          elif 'CHEST' in position:
-              continue
-          elif 'P' == position and  splitted_ids[-3].upper() == 'A':
-              position = 'AP'
-          elif 'PORTRAIT' in position:
-              continue
-          else:
-              raise_with_traceback(ValueError('Unknown position: '+position + ', for file: ' +  lineItems[0]))
-          thisimage['position'] = position
-          listImage.append(thisimage)
+          thisimage = read_filename(line)
+          if thisimage is not None:
+              listImage.append(thisimage)
     fileDescriptor.close()
     return pd.DataFrame(listImage)
 
 def get_name_pickle_file():
     if configs['trainable_densenet']:
-        size_all_images = '224_224'
+        if configs['use_random_crops']: 
+            size_all_images = '256_256'
+        else:
+            size_all_images = '224_224'
     elif configs['remove_pre_avg_pool']:
         size_all_images = '7_7'
     else:
@@ -84,7 +93,11 @@ class DatasetGenerator(Dataset):
         self.listImage = pathDatasetFile
         
         if configs['trainable_densenet'] and configs['load_image_features_from_file']:
-            self.file = h5py.File('./all_images_224_224_prot2.2.h5', 'r')
+            if configs['use_random_crops']: 
+                size_all_images = '256_256'
+            else:
+                size_all_images = '224_224'
+            self.file = h5py.File('./all_images_'+size_all_images+'_prot2.2.h5', 'r')
             
             #much slower
             #store = Store('all_images_224_224_prot2.2.h5df', mode="r")
@@ -96,6 +109,7 @@ class DatasetGenerator(Dataset):
     
     def __getitem__(self, index):
         imageData = []
+        filepath=[]
         for i in range(len(self.listImage)):
             if (configs['trainable_densenet'] and (not configs['load_image_features_from_file'])):
                 imagePath = self.listImage[i]['filepath'].iloc[index]
@@ -121,6 +135,7 @@ class DatasetGenerator(Dataset):
             if self.transform is not None: 
                 imageData[i] = self.transform(imageData[i])
             imageData[i] = np.expand_dims(imageData[i], 0)
+            filepath.append(self.listImage[i]['filepath'].iloc[index])
         imageData = np.concatenate(imageData,0)
         # for checking integrity of images and rest of data
         #a = self.listImage[labels_columns]
@@ -135,12 +150,19 @@ class DatasetGenerator(Dataset):
         #plt.imshow(b)
         #plt.savefig('test.png')
         imageLabel= torch.FloatTensor(self.listImage[0][labels_columns].iloc[index])
-        imageAllColumns= torch.FloatTensor(self.listImage[0][configs['all_input_columns']].iloc[index])
+        imageAllColumns= torch.FloatTensor(self.listImage[0][configs['all_output_columns']].iloc[index])
+        
+        if configs['use_extra_inputs']:
+            col_extra_inputs = [col for col in self.listImage[0] if col.startswith('tobacco_status_')]+[col for col in self.listImage[0] if col.startswith('smoking_tobacco_status_')]+['binary_gender']+['age']
+            extra_inputs = torch.FloatTensor(self.listImage[0][col_extra_inputs].iloc[index])
+        else:
+            extra_inputs = []
+        
+        
+        print(filepath)
+        print()
         #self.transform = transforms.ToTensor()
-        
-        return imageData, imageLabel, imageAllColumns
-        
-    #-------------------------------------------------------------------------------- 
+        return imageData, imageLabel, imageAllColumns, extra_inputs, filepath
     
     def __len__(self):
         return self.n_images
@@ -153,12 +175,41 @@ def get_labels():
         file_with_labels = '/usr/sci/projects/DeepLearning/Tolga_Lab/Projects/Project_JoyceSchroeder/data/data_PFT/data_EDW_clean_Clem/Chest_Xray_20180316_Clem_clean_ResearchID_PFTValuesAndInfo_noPHI.csv'
     
     all_labels = pd.read_csv(file_with_labels)
+    all_labels['fev1_diff'] = all_labels['Predicted FEV1'] - all_labels['Pre-Drug FEV1']
+    all_labels['fvc_diff'] = all_labels['Predicted FVC'] - all_labels['Pre-Drug FVC']
+    
     if not configs['use_set_29']:
         all_labels.rename(index=str, columns=configs['columns_translations'], inplace = True)
     
+    all_labels.fillna(value={'tobacco_status':'Not Asked', 'smoking_tobacco_status':'Never Assessed'}, inplace = True)
     all_labels.dropna(subset=['fvc_predrug'], inplace=True)
+    
+    all_labels['binary_gender'] = (all_labels['gender']=='Male')*1
+    all_labels.replace({'tobacco_status':{
+    'Quit':0,
+    'Never':1,
+    'Yes':2,
+    'Not Asked':3,
+    'Passive':4,
+    'Former Smoker':5},
+    'smoking_tobacco_status':
+    {'Former Smoker':0,
+    'Never Smoker':1,
+    'Current Every Day Smoker':2,
+    'Passive Smoke Exposure - Never Smoker':3,
+    'Light Tobacco Smoker':4,
+    'Never Assessed':5,
+    'Current Some Day Smoker':6,
+    'Heavy Tobacco Smoker':7,
+    'Unknown If Ever Smoked':5}
+    }, inplace = True)
+  
+    all_labels = pd.concat([all_labels,pd.get_dummies(all_labels['tobacco_status'], prefix='tobacco_status').astype('float')],axis=1)
+    all_labels = pd.concat([all_labels,pd.get_dummies(all_labels['smoking_tobacco_status'], prefix='smoking_tobacco_status').astype('float')],axis=1)
 
     all_labels[percentage_labels] = all_labels[percentage_labels] /100.
+    if configs['use_copd_definition_as_label']:
+        all_labels['copd'] = (all_labels['fev1fvc_predrug']< 0.7)*1
     all_labels = configs['pre_transform_labels'].apply_transform(all_labels)
     return all_labels
 
@@ -181,33 +232,43 @@ def get_all_images():
     else:
         file_with_image_filenames = 'train2.txt'
     num_ftrs = 1024
-    
+    list_pretransforms =[]
     if (not configs['load_image_features_from_file']) or configs['trainable_densenet']:
         normalize = transforms.Normalize([0.485, 0.456, 0.406],
                                             [0.229, 0.224, 0.225])
         
-        list_pretransforms =[     image_preprocessing.Convert16BitToFloat(),
+        if configs['use_random_crops']: 
+            resize_size = 256
+        else:
+            resize_size = 224
+        list_pretransforms = list_pretransforms + [     image_preprocessing.Convert16BitToFloat(),
                   image_preprocessing.CropBiggestCenteredInscribedSquare(),
-                  transforms.Resize(size=(224)), 
-                  transforms.RandomHorizontalFlip(),
+                  transforms.Resize(size=(resize_size)), #transforms.RandomHorizontalFlip(),
                   transforms.ToTensor(),
                   normalize]
         
         all_images = read_filenames('/home/sci/ricbl/Documents/projects/radiology-project/pft/' + file_with_image_filenames)
-       
+        
+        '''
+        transformSequence = transforms.Compose(list_pretransforms)
+        all_images = image_preprocessing.preprocess_images(all_images, transformSequence)
+        with open(get_name_pickle_file(), 'wb') as f:
+            pickle.dump(all_images, f, protocol=2)
+        '''
+        
     if (not configs['trainable_densenet']) and (not configs['load_image_features_from_file']):
         chexnetModel = models.load_pretrained_chexnet()
         num_ftrs = chexnetModel.module.densenet121.classifier[0].in_features
         
         chexnetModel.module.densenet121.classifier = nn.Sequential()
         chexnetModel = chexnetModel.cuda()  
+
         list_pretransforms.append(image_preprocessing.ChexnetEncode(chexnetModel))
             
         transformSequence = transforms.Compose(list_pretransforms)
         
         all_images = image_preprocessing.preprocess_images(all_images, transformSequence)
-        del transformSequence
-        del chexnetModel
+
         with open(get_name_pickle_file(), 'wb') as f:
             pickle.dump(all_images, f, protocol=2)
     elif (not configs['trainable_densenet']) and (configs['load_image_features_from_file']):
@@ -217,23 +278,29 @@ def get_all_images():
     
     if (configs['trainable_densenet'] and (configs['load_image_features_from_file'])):
         all_images['preprocessed'] = all_images.index
-    return all_images, num_ftrs
+    return all_images, num_ftrs, list_pretransforms
         
 def get_images():
 
-    all_images, num_ftrs = get_all_images()
+    all_images, num_ftrs, list_pretransforms = get_all_images()
     
     sets_of_images = []
     sets_of_images.append(all_images[all_images['position'].isin(configs['positions_to_use'])])
     
     if configs['use_lateral']:
         sets_of_images.append(all_images[all_images['position'].isin(['LAT'])])
-    
+    list_transforms = []
     if configs['trainable_densenet'] and (not configs['load_image_features_from_file']):
-        transformSequence = transforms.Compose(list_pretransforms)
-    elif configs['trainable_densenet']:
-        transformSequence = transforms.Compose([image_preprocessing.RandomHorizontalFlipNumpy()])
+        list_transforms = list_transforms + list_pretransforms + [image_preprocessing.ToNumpy()]
+    train_list_transforms = list_transforms
+    test_list_transforms = list_transforms
+    if configs['trainable_densenet']:
+        train_list_transforms = train_list_transforms + [image_preprocessing.RandomHorizontalFlipNumpy()]
     else: 
-        transformSequence = transforms.Compose([image_preprocessing.RandomHorizontalFlipNumpy()])
-        
-    return sets_of_images, transformSequence, num_ftrs
+        train_list_transforms = train_list_transforms + [image_preprocessing.RandomHorizontalFlipNumpy()]
+    if configs['use_random_crops'] and configs['trainable_densenet']:
+        train_list_transforms = train_list_transforms+ [image_preprocessing.RandomCropNumpy(224)]
+        test_list_transforms = test_list_transforms+ [image_preprocessing.CenterCropNumpy(224)]
+    trainTransformSequence = transforms.Compose(train_list_transforms)
+    testTransformSequence = transforms.Compose(test_list_transforms)
+    return sets_of_images, trainTransformSequence, testTransformSequence, num_ftrs

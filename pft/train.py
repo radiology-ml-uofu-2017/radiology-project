@@ -30,6 +30,7 @@ from random import *
 import pandas as pd
 from torch.utils.data import DataLoader
 from itertools import izip
+
 try:
     import cPickle as pickle
 except:
@@ -38,15 +39,39 @@ except:
 from configs import configs
 
 
-configs.load_predefined_set_of_configs('p1') #'densenet', 'frozen_densenet', 'p1'
+configs.load_predefined_set_of_configs('fc20180524') #'densenet', 'frozen_densenet', 'p1', 'fc20180524'
+configs['save_model']= True
+configs['N_EPOCHS'] = 50
+configs['BATCH_SIZE'] = 1
+'''
+#configs['training_pipeline']= 'ensemble'
+configs['use_true_predicted']= True
 #configs['pre_transformation'] = 'boxcox'
-#configs['N_EPOCHS'] = 1
-#configs['use_lateral']= True
+configs['N_EPOCHS'] = 50
+configs['use_lateral']= True
 #configs['kind_of_loss']='l1'
-#configs['network_output_kind']='linear'
-#configs['labels_to_use'] ='only_absolute'
+configs['kind_of_loss']='relative_mse'
+configs['network_output_kind']='softplus'
+#configs['labels_to_use'] ='two_ratios'
+configs['labels_to_use'] ='two_predrug_absolute'
+configs['trainable_densenet'] = True
 #configs.load_predefined_set_of_configs('densenet') 
 #configs['output_copd'] =False
+configs['use_extra_inputs']= True
+configs['use_batchnormalization_hidden_layers']= True
+configs['use_random_crops'] = True
+configs['positions_to_use'] = ['PA', 'AP']
+configs['dropout_batch_normalization_last_layer']=True
+configs['densenet_dropout']=0.25
+configs['l2_reg_fc'] = 0.0
+configs['initial_lr_cnn'] = 1e-04
+configs['use_dropout_hidden_layers'] = 0.25
+configs['initial_lr_fc'] = 0.0001
+configs['BATCH_SIZE'] = 22
+#configs['use_copd_definition_as_label'] = True
+#configs['output_copd']= True
+'''
+
 
 configs.open_get_block_set()
 
@@ -61,6 +86,7 @@ import utils
 import metrics
 import inputs
 import time
+#import visualization
 
 logging.info('Using PyTorch ' +str(torch.__version__))
 
@@ -89,20 +115,21 @@ def run_epoch(loaders, model, criterion, optimizer, epoch=0, n_epochs=0, train=T
     end = time.time()
     lossMean = 0.0 
     lossValNorm = 0.0
-    y_corr, y_pred, y_corr_all = (np.empty([0,x]) for x in (len(labels_columns),len(labels_columns),len(configs['all_input_columns'])))
+    y_corr, y_pred, y_corr_all = (np.empty([0,x]) for x in (len(labels_columns),len(labels_columns),len(configs['all_output_columns'])))
 
-    for i, (input, target, column_values) in enumerate(loaders):
+    for i, (input, target, column_values, extra_inputs, filepath) in enumerate(loaders):
         if train:
             optimizer.zero_grad()
         # Forward pass
+        input_var, extra_inputs_var, target_var = ((torch.autograd.Variable(var.cuda(async=True, device = 0), volatile=(not train)) 
+                                               if (not isinstance(var,(list,))) else None) for var in (input,extra_inputs,target))
         
-        output_var = model(torch.autograd.Variable(input.cuda(async=True, device = 0), volatile=(not train)))
-
-        target_var = torch.autograd.Variable(target.cuda(async=True, device = 0), volatile=(not train))
+        output_var = model(input_var, extra_inputs_var)
         
         losses = []
+        
         for k in range(target.size()[1]):
-            losses.append(criterion[k](output_var[:,k], target_var[:,k]))
+            losses.append(criterion[k]['weight']*criterion[k]['loss'](output_var[:,k], target_var[:,k]))
         loss = sum(losses)
         
         #output_var_fixed, target_var_fixed = (x.data.cpu().numpy() for x in (output_var, target_var))
@@ -140,7 +167,7 @@ def select_columns_one_table_after_merge(df, suffix, keep_columns=[]):
     to_return.columns = [(x[:-(len(suffix))] if (x not in keep_columns) else x) for x in to_return ]
     return to_return
 
-def get_loader(set_of_images, cases_to_use, all_labels, transformSequence, train):
+def get_loader(set_of_images, cases_to_use, all_labels, transformSequence, train, verbose = True):
     cases_to_use_on_set_of_images = []
     for i in range(len(set_of_images)):
         current_df = set_of_images[i].copy(deep=True)
@@ -152,7 +179,8 @@ def get_loader(set_of_images, cases_to_use, all_labels, transformSequence, train
     for i in range(len(set_of_images)):
         cases_to_use_on_set_of_images.append(pd.merge(select_columns_one_table_after_merge(all_joined_table, '_'+str(i), ['subjectid', 'crstudy']),all_labels, on=['subjectid', 'crstudy']))
         
-        logging.info('size ' + ('train' if train else 'test') + ' ' + str(i) +': '+str(np.array(cases_to_use_on_set_of_images[i]).shape[0]))
+        if verbose:
+            logging.info('size ' + ('train' if train else 'test') + ' ' + str(i) +': '+str(np.array(cases_to_use_on_set_of_images[i]).shape[0]))
     t_dataset = inputs.DatasetGenerator(cases_to_use_on_set_of_images, transformSequence)
     if train:
       t_indices = torch.randperm(len(t_dataset))
@@ -164,7 +192,7 @@ def get_loader(set_of_images, cases_to_use, all_labels, transformSequence, train
     return t_loader
 
 # creates models, optimizers, criterion and dataloaders for all models that will be trained in parallel
-def load_training_pipeline(cases_to_use, all_images, all_labels, transformSequence, num_ftrs):
+def load_training_pipeline(cases_to_use, all_images, all_labels, trainTransformSequence, testTransformSequence, num_ftrs):
   
     models = []
     criterions = []
@@ -206,8 +234,10 @@ def load_training_pipeline(cases_to_use, all_images, all_labels, transformSequen
         logging.info('total images training: '+str(np.array(train_images).shape[0]))
         logging.info('total images test: '+str(np.array(test_images).shape[0]))
         
-        train_loader=get_loader(all_images, train_images, all_labels, transformSequence, train = True)
-        test_loader=get_loader(all_images, test_images, all_labels, transformSequence, train= False)
+        train_loader=get_loader(all_images, train_images, all_labels, trainTransformSequence, train = True)
+        if i == 0:
+            eval_train_loader=get_loader(all_images, train_images, all_labels, testTransformSequence, train = False, verbose = False)
+        test_loader=get_loader(all_images, test_images, all_labels, testTransformSequence, train= False)
 
         logging.info('finished loaders and generators. starting models')
         
@@ -215,13 +245,16 @@ def load_training_pipeline(cases_to_use, all_images, all_labels, transformSequen
         
         logging.info('finished models. starting criterion')
         
+        def relative_error_mse_loss(input, target):
+            return torch.sum(torch.mean((torch.max(input,target)/torch.min(input,target)-1) ** 1, dim = 0))
+        
         #defining what loss function should be used
         losses_dict = {'l1':nn.L1Loss(size_average = True).cuda(), 
           'l2':nn.MSELoss(size_average = True).cuda(), 
           'smoothl1':nn.SmoothL1Loss(size_average = True).cuda(), 
-          'bce':nn.BCELoss(size_average = True).cuda()}
-
-        criterion = [losses_dict[configs['get_individual_kind_of_loss'][k]] for k in configs['get_labels_columns']]
+          'bce':nn.BCELoss(size_average = True).cuda(),
+          'relative_mse':relative_error_mse_loss}
+        criterion = [{'loss':losses_dict[configs['get_individual_kind_of_loss'][k]], 'weight':configs['get_individual_loss_weights'][k]} for k in configs['get_labels_columns']]
 
         '''
         optimizer = optim.Adam( [
@@ -230,7 +263,7 @@ def load_training_pipeline(cases_to_use, all_images, all_labels, transformSequen
           ], lr=configs['initial_lr_fc'] , weight_decay=configs['l2_reg_fc'])
         '''
         optimizer = optim.Adam( [
-          {'params':model.module.fc.parameters(), 'lr':configs['initial_lr_fc'], 'weight_decay':configs['l2_reg_fc']}, 
+          {'params':model.module.final_layers.parameters(), 'lr':configs['initial_lr_fc'], 'weight_decay':configs['l2_reg_fc']}, 
           {'params':model.module.cnn.parameters(), 'lr':configs['initial_lr_cnn'], 'weight_decay':configs['l2_reg_cnn']}
           ], lr=configs['initial_lr_fc'] , weight_decay=configs['l2_reg_fc'])
                 
@@ -241,19 +274,29 @@ def load_training_pipeline(cases_to_use, all_images, all_labels, transformSequen
         schedulers = schedulers + [scheduler]
         train_loaders = train_loaders + [train_loader]
         test_loaders = test_loaders + [test_loader]
-    return models, criterions, optimizers, schedulers, train_loaders, test_loaders
+    return models, criterions, optimizers, schedulers, train_loaders, test_loaders, eval_train_loader
 
 def concat_with_expansion(x,y, axis):
     return np.concatenate((x, np.expand_dims(y, axis = 2)), axis = axis)
-              
-def train(models, criterions, optimizers, schedulers, train_loaders, test_loaders):    # Train model
+
+def save_model(models):
+    for i, model in enumerate(models):
+        torch.save(model.state_dict(), './models/' + configs['output_model_name'] + '_' + str(i))
+
+def load_model(models, input_model_name):
+    for i, model in enumerate(models):
+        model.load_state_dict(torch.load('./models/' + input_model_name + '_' + str(i)))
+    
+def train(models, criterions, optimizers, schedulers, train_loaders, test_loaders, eval_train_loader):    # Train model
     n_epochs = configs['N_EPOCHS']
     logging.info('starting training')
     
     training_range = configs['get_training_range']
     
-    train_dataset_size, test_dataset_size  = (np.sum([len(x[0]) for x in k[0]]) for k in (train_loaders, test_loaders))
-    ys_corr_train, ys_pred_train, ys_corr_all_train, ys_corr_test, ys_pred_test, ys_corr_all_test = (np.empty([x,len(labels_columns),0]) for x in (train_dataset_size,train_dataset_size,train_dataset_size, test_dataset_size,test_dataset_size, test_dataset_size))
+    train_dataset_size, test_dataset_size  = (np.sum([len(x[0]) for x in k[0]]) for k in ([eval_train_loader], test_loaders))
+    ys_corr_train, ys_pred_train, ys_corr_all_train, ys_corr_test, ys_pred_test, ys_corr_all_test = (np.empty([x,y,0]) for x, y in \
+      ((train_dataset_size, len(labels_columns)),(train_dataset_size, len(labels_columns)),(train_dataset_size, len(configs['all_output_columns'])), \
+        (test_dataset_size, len(labels_columns)),(test_dataset_size, len(labels_columns)), (test_dataset_size, len(configs['all_output_columns']))))
     
     if configs['training_pipeline']=='simple':
         concatenate_funcation = lambda x,y: y
@@ -275,7 +318,7 @@ def train(models, criterions, optimizers, schedulers, train_loaders, test_loader
             train_loader = train_loaders[i]
             test_loader = test_loaders[i]
         
-            _, _, loss, y_corr_train, y_pred_train, y_corr_all_train = run_epoch(
+            _, _, loss, _, _, _ = run_epoch(
                 loaders=train_loader,
                 model=model,
                 criterion=criterion,
@@ -295,24 +338,37 @@ def train(models, criterions, optimizers, schedulers, train_loaders, test_loader
                 n_epochs=n_epochs,
                 train=False
                 )
+            
+            if epoch==n_epochs:
+                _, _, _, y_corr_train, y_pred_train, y_corr_all_train = run_epoch(
+                      loaders=eval_train_loader,
+                      model=model,
+                      criterion=criterion,
+                      optimizer=None,
+                      epoch=epoch,
+                      n_epochs=n_epochs,
+                      train=False
+                    )
+                
+                ys_corr_train, ys_pred_train, ys_corr_all_train, ys_corr_test, ys_pred_test, ys_corr_all_test = \
+                  (concatenate_funcation(x,y) for x,y in \
+                    ((ys_corr_train,y_corr_train),(ys_pred_train,y_pred_train),(ys_corr_all_train,y_corr_all_train), (ys_corr_test,y_corr_test),(ys_pred_test,y_pred_test), (ys_corr_all_test,y_corr_all_test)))
+        
             if configs['use_lr_scheduler']:
                 schedulers[i].step(loss)
             all_val_losses = np.concatenate((all_val_losses, loss), axis=0)
             
-            ys_corr_train, ys_pred_train, ys_corr_all_train, ys_corr_test, ys_pred_test, ys_corr_all_test = \
-                  (concatenate_funcation(x,y) for x,y in \
-                    ((ys_corr_train,y_corr_train),(ys_pred_train,y_pred_train),(ys_corr_all_train,y_corr_all_train), (ys_corr_test,y_corr_test),(ys_pred_test,y_pred_test), (ys_corr_all_test,y_corr_all_test)))
-                
-        if epoch==n_epochs:
-            if configs['training_pipeline']=='ensemble':
-                ys_corr_train, ys_pred_train, ys_corr_all_train, ys_corr_test, ys_pred_test, ys_corr_all_test = \
-                  ( np.mean(x, axis = 1) for x in (ys_corr_train,ys_pred_train,ys_corr_all_train, ys_corr_test,ys_pred_test, ys_corr_all_test))
-                
-            metrics.report_final_results(ys_corr_train , ys_pred_train, ys_corr_all_train, train = True)
-            metrics.report_final_results(ys_corr_test , ys_pred_test, ys_corr_all_test, train = False)
-            
         logging.info('Train loss ' + str(epoch) + '/' + str(n_epochs) + ': ' +str(np.average(all_train_losses)))
         logging.info('Val loss ' + str(epoch) + '/' + str(n_epochs) + ': '+str(np.average(all_val_losses)))
+        
+        if epoch==n_epochs:
+            save_model(models)
+            if configs['training_pipeline']=='ensemble':
+                ys_corr_train, ys_pred_train, ys_corr_all_train, ys_corr_test, ys_pred_test, ys_corr_all_test = \
+                  ( np.mean(x, axis = 2) for x in (ys_corr_train,ys_pred_train,ys_corr_all_train, ys_corr_test,ys_pred_test, ys_corr_all_test))
+            
+            metrics.report_final_results(ys_corr_train , ys_pred_train, ys_corr_all_train, train = True)
+            metrics.report_final_results(ys_corr_test , ys_pred_test, ys_corr_all_test, train = False)
 
 def merge_images_and_labels(all_images, all_labels):
     for i, image_set in enumerate(all_images):
@@ -329,7 +385,7 @@ def main():
     
     logging.info('started feature loading')
     
-    all_images, transformSequence, num_ftrs = inputs.get_images()
+    all_images, trainTransformSequence, testTransformSequence, num_ftrs = inputs.get_images()
     
     logging.info('ended feature loading. started label loading')
     
@@ -338,8 +394,15 @@ def main():
     logging.info('ended label loading')
     cases_to_use = merge_images_and_labels(all_images, all_labels)
     
-    models, criterions, optimizers, schedulers, train_loaders, test_loaders = load_training_pipeline(cases_to_use, all_images, all_labels, transformSequence, num_ftrs)
-    train(models, criterions, optimizers, schedulers, train_loaders, test_loaders)
+    models, criterions, optimizers, schedulers, train_loaders, test_loaders, eval_train_loader = load_training_pipeline(cases_to_use, all_images, all_labels, trainTransformSequence, testTransformSequence, num_ftrs)
+    
+    load_model(models, 'model20180525-162109-1987')
+    '''
+    for i, model in enumerate(models):
+        visualization.GradCAM(model).execute(test_loaders[i])
+        1/0
+    '''
+    train(models, criterions, optimizers, schedulers, train_loaders, test_loaders, eval_train_loader)
     
 if __name__ == '__main__':
     main()

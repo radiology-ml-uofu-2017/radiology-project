@@ -24,15 +24,15 @@ class PreTransformLabels():
     def sigmoid_normalization(self):
         def f(col):
             if (col.name in self.configs['get_labels_columns']) and (self.configs['get_individual_output_kind'][col.name]=='sigmoid'):
-                return (col-ranges_labels[col.name][0]*self.configs['sigmoid_safety_constant'][col.name][0])/ranges_labels[col.name][1]/self.configs['sigmoid_safety_constant'][col.name][1]
+                return (col-self.ranges_labels[col.name][0]*self.configs['sigmoid_safety_constant'][col.name][0])/self.ranges_labels[col.name][1]/self.configs['sigmoid_safety_constant'][col.name][1]
             else:
                 return col
         return f
     
     def sigmoid_denormalization(self,np_array):
         for i in range(np_array.shape[1]):
-            if (np_array.shape[1]>len(self.configs['get_labels_columns'])) and (np_array.shape[1]==len(self.configs['all_input_columns'])):
-                col_name = self.configs['all_input_columns'][i]
+            if (np_array.shape[1]>len(self.configs['get_labels_columns'])) and (np_array.shape[1]==len(self.configs['all_output_columns'])):
+                col_name = self.configs['all_output_columns'][i]
                 if col_name not in self.configs['get_labels_columns']:
                     continue
             elif np_array.shape[1]==len(self.configs['get_labels_columns']):
@@ -44,8 +44,8 @@ class PreTransformLabels():
     def inverse_pre_transform(self,np_array):
         transform_dict = {'boxcox':self.inverse_box_cox, 'none':lambda x, name: x, 'log': lambda x, name: np.exp(x) }
         for i in range(np_array.shape[1]):
-            if (np_array.shape[1]>len(self.configs['get_labels_columns'])) and (np_array.shape[1]==len(self.configs['all_input_columns'])):
-                col_name = self.configs['all_input_columns'][i]
+            if (np_array.shape[1]>len(self.configs['get_labels_columns'])) and (np_array.shape[1]==len(self.configs['all_output_columns'])):
+                col_name = self.configs['all_output_columns'][i]
                 if col_name not in self.configs['get_labels_columns']:
                     continue
             elif np_array.shape[1]==len(self.configs['get_labels_columns']):

@@ -56,17 +56,23 @@ def get_model_cnn():
     x.module.set_classifier_containing_avg_pool_part(nn.Sequential())
     return x.module.cuda()
 
+def get_qt_inputs():
+    n_inputs = 1
+    if configs['use_lateral']:
+        n_inputs = 2
+    if configs['tie_cnns_same_weights']:
+        n_cnns = 1
+    else:
+        n_cnns = n_inputs 
+    return n_inputs, n_cnns
+            
 class ModelMoreInputs(nn.Module):
     def __init__(self, num_ftrs):
         super(ModelMoreInputs, self).__init__()
-        self.n_inputs = 1
-        if configs['use_lateral']:
-            self.n_inputs = 2
-        if configs['tie_cnns_same_weights']:
-            self.n_cnns = 1
-        else:
-            self.n_cnns = self.n_inputs 
-        self.fc = ModelFCPart(num_ftrs*self.n_inputs)
+        
+        self.n_inputs, self.n_cnns = get_qt_inputs()
+        
+        self.final_layers = ModelFCPart(num_ftrs*self.n_inputs)
         
         cnns = []
         for i in range(self.n_cnns):
@@ -76,58 +82,101 @@ class ModelMoreInputs(nn.Module):
                 cnns.append(nn.Sequential())
         self.cnn = nn.ModuleList(cnns)
         
-    def forward(self, args):
+    def forward(self, images, extra_fc_input = None):
         all_outputs = []
-        if not args.size()[1]==self.n_inputs:
+        if not images.size()[1]==self.n_inputs:
             raise_with_traceback(ValueError('Wrong number of arguments for the model forward function. Expected ' + str(self.n_inputs) + ' and received ' + str(args.size()[1])))
-        for i in range(args.size()[1]):
+        for i in range(images.size()[1]):
             if configs['tie_cnns_same_weights']:
                 index = 0
             else:
                 index = i
-            all_outputs.append(self.cnn[index](args[:,i,...]))
-        
-        x = torch.cat(all_outputs, 1)
-        x = self.fc(x)
+            all_outputs.append(self.cnn[index](images[:,i,...]))
+            
+        x = self.final_layers(all_outputs, extra_fc_input)
         return x
 
+def get_spatial_part_fc(num_ftrs):
+    spatial_part = torch.nn.Sequential()
+    spatial_part.add_module("spatial_output",torch.nn.Sequential())
+    current_n_channels = num_ftrs
+    
+    if configs['use_conv11']:
+        if configs['use_batchnormalization_hidden_layers']:
+            spatial_part.add_module("bn_conv11",torch.nn.BatchNorm2d(current_n_channels).cuda())
+        spatial_part.add_module("conv11",nn.Conv2d( in_channels = current_n_channels, out_channels =  configs['conv11_channels'], kernel_size = 1).cuda())
+        spatial_part.add_module("reluconv11",nn.ReLU().cuda())
+        current_n_channels = configs['conv11_channels']
+        
+    if not configs['remove_pre_avg_pool']:
+        spatial_part.add_module("avgpool",nn.AvgPool2d(7).cuda())
+    else:
+        current_n_channels = current_n_channels*49
+    
+    spatial_part.add_module("flatten",Flatten().cuda())
+    return spatial_part, current_n_channels
+        
 class ModelFCPart(nn.Module):
     def __init__(self, num_ftrs):
         super(ModelFCPart, self).__init__()
-        self.fc = torch.nn.Sequential()
-        current_n_channels = num_ftrs
         
-        if configs['use_conv11']:
-            if configs['use_batchnormalization_hidden_layers']:
-                self.fc.add_module("bn_conv11",torch.nn.BatchNorm2d(current_n_channels).cuda())
-            self.fc.add_module("conv11",nn.Conv2d( in_channels = current_n_channels, out_channels =  configs['conv11_channels'], kernel_size = 1).cuda())
-            self.fc.add_module("reluconv11",nn.ReLU().cuda())
-            current_n_channels = configs['conv11_channels']
-            
-        if not configs['remove_pre_avg_pool']:
-            self.fc.add_module("avgpool",nn.AvgPool2d(7).cuda())
-        else:
-            current_n_channels = current_n_channels*49
+        _, self.n_cnns = get_qt_inputs()
+        spatial_parts = []
+        for i in range(self.n_cnns):
+            this_spatial_part, current_n_channels = get_spatial_part_fc(num_ftrs)
+            spatial_parts.append(this_spatial_part)
+        self.spatial_part = nn.ModuleList(spatial_parts)
         
-        self.fc.add_module("flatten",Flatten().cuda())
+        activation_function_dict = {'relu': nn.ReLU().cuda(), 'tanh':nn.Tanh().cuda(), 
+                            'sigmoid':nn.Sigmoid().cuda(), 'softplus':nn.Softplus().cuda()
+        }
+    
+        activation_function = activation_function_dict[configs['fc_activation']]
+    
+        self.fc_before_extra_inputs = torch.nn.Sequential()
+        self.fc_after_extra_inputs = torch.nn.Sequential()
         
+        current_model = self.fc_before_extra_inputs
         for layer_i in range(configs['n_hidden_layers']): 
-            self.fc.add_module("drop_"+str(layer_i),nn.Dropout(p=configs['use_dropout_hidden_layers']).cuda())
+            if (configs['layer_to_insert_extra_inputs']== layer_i) and configs['use_extra_inputs']:
+                current_n_channels = current_n_channels+15
+                current_model = self.fc_after_extra_inputs
             if configs['use_batchnormalization_hidden_layers']:
-                self.fc.add_module("bn_"+str(layer_i),torch.nn.BatchNorm1d(current_n_channels).cuda())
-                
+                current_model.add_module("bn_"+str(layer_i),torch.nn.BatchNorm1d(current_n_channels).cuda())
+            current_model.add_module("drop_"+str(layer_i),nn.Dropout(p=configs['use_dropout_hidden_layers']).cuda())
             # On DGX, this next line, in the first iteration of the loop, is the one taking a long time (about 250s) in the .cuda() part.
             # probably because of some incompatibility between Cuda 9.0 and pytorch 0.1.12
-            self.fc.add_module("linear_"+str(layer_i),nn.Linear(current_n_channels, configs['channels_hidden_layers'] ).cuda()) 
-            self.fc.add_module("relu_"+str(layer_i),nn.ReLU().cuda())
+            current_model.add_module("linear_"+str(layer_i),nn.Linear(current_n_channels, configs['channels_hidden_layers'] ).cuda()) 
+            current_model.add_module("nonlinearity_"+str(layer_i),activation_function)
             current_n_channels = configs['channels_hidden_layers']
-              
-        self.fc.add_module("linear_out", nn.Linear(current_n_channels , len(labels_columns)).cuda())
         
-        self.fc.apply(weights_init)
+        if configs['use_extra_inputs'] and (configs['layer_to_insert_extra_inputs']==(configs['n_hidden_layers']+1)):
+            current_n_channels = current_n_channels+15
+            current_model = self.fc_after_extra_inputs
+        
+        if configs['dropout_batch_normalization_last_layer']:
+            if configs['use_batchnormalization_hidden_layers']:
+                current_model.add_module("bn_out",torch.nn.BatchNorm1d(current_n_channels).cuda())
+            current_model.add_module("drop_out",nn.Dropout(p=configs['use_dropout_hidden_layers']).cuda())
+        current_model.add_module("linear_out", nn.Linear(current_n_channels , len(labels_columns)).cuda())
+        
+        self.fc_after_extra_inputs.apply(weights_init)
+        self.fc_before_extra_inputs.apply(weights_init)
+        self.spatial_part.apply(weights_init)
       
-    def forward(self, x):
-        x = self.fc(x)
+    def forward(self, spatial_outputs, extra_fc_input = None):
+        all_outputs = []
+        for i, spatial_output in enumerate(spatial_outputs):
+            if configs['tie_conv11_same_weights']:
+                index = 0
+            else:
+                index = i            
+            all_outputs.append(self.spatial_part[index](spatial_output.contiguous()))
+        x = torch.cat(all_outputs, 1)
+        x = self.fc_before_extra_inputs(x)
+        if extra_fc_input is not None:
+            x = torch.cat((extra_fc_input,x),1)
+        x = self.fc_after_extra_inputs(x)
         output_kind_each_output = [ configs['get_individual_output_kind'][name] for name in configs['get_labels_columns']]
         dic_output_kinds = {'linear':nn.Sequential(),'softplus':nn.Sequential(nn.Softplus().cuda()), 'sigmoid':nn.Sequential(nn.Sigmoid().cuda())}
         #add exception when output_kind_each_output cotains element not in dic_output_kinds.keys()
@@ -164,7 +213,7 @@ class DenseNet121(nn.Module):
         
         self.densenet121.load_state_dict(model_zoo.load_url(model_urls['densenet121']))
         '''
-        self.densenet121 = torchvision.models.densenet121(pretrained=False)
+        self.densenet121 = torchvision.models.densenet121(pretrained=False, drop_rate = configs['densenet_dropout'])
         
         num_ftrs = self.densenet121.classifier.in_features
         
