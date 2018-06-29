@@ -57,7 +57,7 @@ class ConfigsClass(object):
         
     def add_predefined_set_of_configs(self,name, dict_configs):
         if not set(dict_configs.keys()).issubset(self.configs.keys()): 
-            raise_with_traceback(ValueError('At least one variable in given dict is not present in the configs'))
+            raise_with_traceback(ValueError('At least one variable in given dict is not present in the configs:' + str(set(dict_configs.keys()).difference(self.configs.keys()))))
         self.predefined[name] = dict_configs
         
     def load_predefined_set_of_configs(self, name):
@@ -80,9 +80,9 @@ configs = ConfigsClass()
 #configs from this block should probably be the same regardless of model and machine
 configs.add_variable('training_pipeline', 'simple') #one_vs_all, ensemble, simple
 configs.add_variable('use_set_29', False)
-configs.add_variable('pre_transformation', 'none') # 'boxcox', 'log', 'none'
+configs.add_variable('pre_transformation', 'none') # 'boxcox', 'log', 'none', 'residual'
 configs.add_variable('individual_pre_transformation', {'copd':'none'})
-configs.add_variable('CKPT_PATH', 'model.pth.tar')
+configs.add_variable('CKPT_PATH', 'densenet121.pth.tar')
 configs.add_variable('timestamp', timestamp)
 configs.add_variable('output_image_name', 'results' + timestamp +'.png')
 configs.add_variable('output_model_name', 'model' + timestamp )
@@ -111,6 +111,19 @@ configs.add_variable('dropout_batch_normalization_last_layer',False)
 configs.add_variable('layer_to_insert_extra_inputs',lambda self:self['n_hidden_layers']+1)
 configs.add_variable('densenet_dropout',0.0) # 0 turn off dropout
 configs.add_variable('fc_activation','relu')
+configs.add_variable('chexnet_layers',121)
+configs.add_variable('chexnet_architecture','densenet')
+configs.add_variable('multiplier_constant_meanvar_var_loss',12)#50)#4)
+configs.add_variable('multiplier_constant_meanvar_bce_loss',0.01#)10)#)10/30./100.)
+configs.add_variable('multiplier_constant_meanvar_mean_loss',1)
+configs.add_variable('use_mean_var_loss',False)
+configs.add_variable('meanvarloss_discretization_spacing',0.01)
+configs.add_variable('dsnm_n_groups',50)
+configs.add_variable('use_pca_dsnm',True)
+configs.add_variable('dsnm_pca_size',100)
+configs.add_variable('use_dsnm',False)
+configs.add_variable('use_more_one_gpu',False)
+
 
 #These are the main configs to change from default
 configs.add_variable('trainable_densenet', False)
@@ -137,6 +150,7 @@ configs.add_variable('remove_pre_avg_pool', True)
 configs.add_variable('l2_reg_fc', 0.05)
 configs.add_variable('l2_reg_cnn', 0.0)
 
+configs.add_variable('use_sigmoid_safety_constants',False)
 configs.add_variable('sigmoid_safety_constant', 
                      {'fvc_pred':[0.5,1.15], 
                    'fev1_pred':[0.45,1.15], 
@@ -188,6 +202,45 @@ configs.add_variable('all_output_columns',['fvc_pred',
                         'fvc_diff'])
 
 
+configs.add_variable('BATCH_SIZE',lambda self: get_batch_size(self))
+
+configs.add_variable('get_individual_kind_of_loss',lambda self: get_individual_kind_of_loss(self))
+
+configs.add_variable('get_individual_output_kind',lambda self: get_individual_output_kind(self))
+
+configs.add_variable('get_individual_pre_transformation',lambda self: get_individual_pre_transformation(self))
+
+configs.add_variable('get_individual_loss_weights',lambda self: get_individual_loss_weights(self))
+
+# defining all variables that the network should output
+configs.add_self_referenced_variable_from_dict('get_labels_columns_pft', 'labels_to_use',
+                                      {'two_ratios': ['fev1fvc_predrug','fev1_ratio'], 
+                                       'three_absolute':['fev1_predrug','fvc_predrug', 'fev1_pred'], 
+                                       'all_nine':['fvc_pred','fev1_pred','fev1fvc_pred','fvc_predrug','fev1_predrug','fev1fvc_predrug','fvc_ratio','fev1_ratio','fev1fvc_ratio'],
+                                       'only_absolute':['fev1_predrug','fvc_predrug', 'fev1_pred', 'fvc_pred'], 
+                                       'fev1fvc_predrug_absolute':['fev1_predrug','fvc_predrug'], 
+                                       'predict_diffs':['fev1_diff','fvc_diff'], 
+                                       'two_predrug_absolute':['fev1_predrug','fvc_predrug'], 
+                                       'none':[]}) 
+                                      
+configs.add_self_referenced_variable_from_dict('get_labels_columns_copd', 'output_copd',
+                                      {True: ['copd'], False: []}) 
+
+configs.add_variable('get_labels_columns',lambda self: self['get_labels_columns_pft'] + self['get_labels_columns_copd'])
+
+configs.add_self_referenced_variable_from_dict('pft_plot_columns', 'labels_to_use',
+                                      {'two_ratios': [['fev1fvc_predrug'],['fev1_ratio']], 
+                                       'three_absolute':[['fev1_predrug','fvc_predrug', 'fev1_pred'],['fev1fvc_predrug'],['fev1_ratio']], 
+                                       'all_nine':[['fvc_pred','fev1_pred','fev1fvc_pred','fvc_predrug','fev1_predrug','fev1fvc_predrug','fvc_ratio','fev1_ratio','fev1fvc_ratio']],
+                                       'only_absolute':[['fev1_predrug','fvc_predrug', 'fev1_pred', 'fvc_pred'], ['fev1fvc_predrug'],['fev1_ratio']], 
+                                       'fev1fvc_predrug_absolute':[['fev1_predrug','fvc_predrug'], ['fev1fvc_predrug']], 
+                                       'predict_diffs':[['fev1_diff','fvc_diff'], ['fev1fvc_predrug'], ['fev1_ratio']], 
+                                       'two_predrug_absolute':[['fev1_predrug','fvc_predrug'], ['fev1fvc_predrug'], ['fev1_ratio']],
+                                       'none':[]})
+                                      
+configs.add_variable('pre_transform_labels', PreTransformLabels(configs))
+
+
 configs.add_predefined_set_of_configs('densenet', { 'trainable_densenet':True, 
                                            'remove_pre_avg_pool':False,
                                              'use_dropout_hidden_layers':0.25})
@@ -218,6 +271,37 @@ configs.add_predefined_set_of_configs('fc20180524', {'use_true_predicted': True
                                                 ,'use_dropout_hidden_layers': 0.25
                                                 ,'initial_lr_fc': 0.0001})
 
+configs.add_predefined_set_of_configs('resnet18', {'chexnet_architecture': 'resnet'
+                                                ,'chexnet_layers': 18
+                                                ,'CKPT_PATH':'model_chestxray14_resnet_18.t7'})
+
+configs.add_predefined_set_of_configs('cnn20180628', {'use_true_predicted': True
+                                                ,'use_lateral': True
+                                                ,'kind_of_loss':'relative_mse'
+                                                ,'network_output_kind':'softplus'
+                                                ,'labels_to_use':'two_ratios'
+                                                , 'trainable_densenet': True
+                                                ,'use_extra_inputs': True
+                                                ,'use_batchnormalization_hidden_layers': True
+                                                ,'use_random_crops': True
+                                                ,'positions_to_use': ['PA', 'AP']
+                                                ,'dropout_batch_normalization_last_layer':True
+                                                 , 'densenet_dropout':0.25
+                                                ,'l2_reg_fc': 0.0
+                                                ,'initial_lr_cnn': 1e-04
+                                                ,'use_dropout_hidden_layers': 0.25
+                                                ,'initial_lr_fc': 0.0001
+                                                ,'BATCH_SIZE':22})
+
+configs.add_predefined_set_of_configs('meanvar_loss', {'use_mean_var_loss': True
+                                                ,'kind_of_loss': 'l2'
+                                                #,'use_dropout_hidden_layers':0.0
+                                                ,'dropout_batch_normalization_last_layer':False
+                                                , 'network_output_kind': 'linear'
+                                                ,'initial_lr_fc': 0.0001
+                                                ,'initial_lr_cnn': 0.0001
+                                                ,'BATCH_SIZE': 64})
+
 configs.add_self_referenced_variable_from_dict('get_available_memory', 'machine_to_use',
                                       {'dgx': 15600-550-10, 
                                        'titan':11700-2978,#11700-550-10, 
@@ -244,15 +328,6 @@ def get_individual_pre_transformation(self):
 def get_individual_loss_weights(self):
     return get_individual_characteristic('individual_loss_weights', 'loss_weight', self)
 
-configs.add_variable('BATCH_SIZE',lambda self: get_batch_size(self))
-
-configs.add_variable('get_individual_kind_of_loss',lambda self: get_individual_kind_of_loss(self))
-
-configs.add_variable('get_individual_output_kind',lambda self: get_individual_output_kind(self))
-
-configs.add_variable('get_individual_pre_transformation',lambda self: get_individual_pre_transformation(self))
-
-configs.add_variable('get_individual_loss_weights',lambda self: get_individual_loss_weights(self))
 
 configs.add_predefined_set_of_configs('frozen_densenet', {})
 
@@ -260,31 +335,3 @@ configs.add_predefined_set_of_configs('copd_only', {'kind_of_loss':'bce',
                                                           'labels_to_use':None,
                                                           'network_output_kind':'sigmoid',
                                                           'output_copd':True})
-
-# defining all variables that the network should output
-configs.add_self_referenced_variable_from_dict('get_labels_columns_pft', 'labels_to_use',
-                                      {'two_ratios': ['fev1fvc_predrug','fev1_ratio'], 
-                                       'three_absolute':['fev1_predrug','fvc_predrug', 'fev1_pred'], 
-                                       'all_nine':['fvc_pred','fev1_pred','fev1fvc_pred','fvc_predrug','fev1_predrug','fev1fvc_predrug','fvc_ratio','fev1_ratio','fev1fvc_ratio'],
-                                       'only_absolute':['fev1_predrug','fvc_predrug', 'fev1_pred', 'fvc_pred'], 
-                                       'fev1fvc_predrug_absolute':['fev1_predrug','fvc_predrug'], 
-                                       'predict_diffs':['fev1_diff','fvc_diff'], 
-                                       'two_predrug_absolute':['fev1_predrug','fvc_predrug'], 
-                                       'none':[]}) 
-                                      
-configs.add_self_referenced_variable_from_dict('get_labels_columns_copd', 'output_copd',
-                                      {True: ['copd'], False: []}) 
-
-configs.add_variable('get_labels_columns',lambda self: self['get_labels_columns_pft'] + self['get_labels_columns_copd'])
-
-configs.add_self_referenced_variable_from_dict('pft_plot_columns', 'labels_to_use',
-                                      {'two_ratios': [['fev1fvc_predrug'],['fev1_ratio']], 
-                                       'three_absolute':[['fev1_predrug','fvc_predrug', 'fev1_pred'],['fev1fvc_predrug'],['fev1_ratio']], 
-                                       'all_nine':[['fvc_pred','fev1_pred','fev1fvc_pred','fvc_predrug','fev1_predrug','fev1fvc_predrug','fvc_ratio','fev1_ratio','fev1fvc_ratio']],
-                                       'only_absolute':[['fev1_predrug','fvc_predrug', 'fev1_pred', 'fvc_pred'], ['fev1fvc_predrug'],['fev1_ratio']], 
-                                       'fev1fvc_predrug_absolute':[['fev1_predrug','fvc_predrug'], ['fev1fvc_predrug']], 
-                                       'predict_diffs':[['fev1_diff','fvc_diff'], ['fev1fvc_predrug'], ['fev1_ratio']], 
-                                       'two_predrug_absolute':[['fev1_predrug','fvc_predrug'], ['fev1fvc_predrug'], ['fev1_ratio']],
-                                       'none':[]})
-                                      
-configs.add_variable('pre_transform_labels', PreTransformLabels(configs))

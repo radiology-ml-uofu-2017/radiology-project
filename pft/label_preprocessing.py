@@ -1,16 +1,31 @@
 import numpy as np
 import scipy.stats
-np.seterr(all='raise')
+
 class PreTransformLabels():
     def __init__(self, configs1):
         pass
         self.maxlogs = {}
         self.configs = configs1
     
+    def set_pre_transformation_labels(self, pre_transformation_labels):
+        self.pre_transformation_labels = pre_transformation_labels
+    
+    def residual_preprocess(self, x, name):
+        ['fvc_pred','fev1_pred','fev1fvc_pred','fvc_predrug','fev1_predrug','fev1fvc_predrug','fvc_ratio','fev1_ratio','fev1fvc_ratio']
+        if name == 'fev1fvc_predrug':
+            residue = 0.7
+        elif name == 'fev1_ratio':
+            residue = 0.8
+        elif name == 'fev1_predrug':
+            residue = self.pre_transformation_labels['fev1_pred']
+        elif name == 'fvc_predrug':
+            residue = self.pre_transformation_labels['fvc_pred']
+        return x - residue, residue
+      
     def pre_transformation(self):
-        transform_dict = {'boxcox':scipy.stats.boxcox, 'none':lambda x: (x, 0), 'log': lambda x: (np.log(x),0) }
+        transform_dict = {'boxcox':lambda x,name: scipy.stats.boxcox(x), 'none':lambda x, name: (x, 0), 'log': lambda x, name: (np.log(x),0), 'residual':self.residual_preprocess }
         def f(col):
-            transform_result = transform_dict[self.configs['get_individual_pre_transformation'][col.name]](col)
+            transform_result = transform_dict[self.configs['get_individual_pre_transformation'][col.name]](col, col.name)
             self.maxlogs[col.name] = transform_result[1]
             return transform_result[0]
         return f
@@ -42,7 +57,7 @@ class PreTransformLabels():
         return np_array
         
     def inverse_pre_transform(self,np_array):
-        transform_dict = {'boxcox':self.inverse_box_cox, 'none':lambda x, name: x, 'log': lambda x, name: np.exp(x) }
+        transform_dict = {'boxcox':self.inverse_box_cox, 'none':lambda x, name: x, 'log': lambda x, name: np.exp(x), 'residual': self.inverse_residual_preprocess}
         for i in range(np_array.shape[1]):
             if (np_array.shape[1]>len(self.configs['get_labels_columns'])) and (np_array.shape[1]==len(self.configs['all_output_columns'])):
                 col_name = self.configs['all_output_columns'][i]
@@ -63,6 +78,10 @@ class PreTransformLabels():
             print(lmbda*y+1)
             print(1/lmbda)
             raise
+    
+    def inverse_residual_preprocess(self, x, name):
+        residue = self.maxlogs[name]
+        return x + residue
     
     def apply_inverse_transform(self, all_labels):
         

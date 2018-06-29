@@ -1,11 +1,11 @@
 #!/home/sci/ricbl/Documents/virtualenvs/dgx_python2_pytorch0.1/bin/python
 #SBATCH --time=0-30:00:00 # walltime, abbreviated by -t
 #SBATCH --nodes=1 # number of cluster nodes, abbreviated by -N
-#SBATCH --mincpus=8
+#SBATCH --mincpus=4
 #SBATCH --gres=gpu:1
 #SBATCH -o dgx_log/slurm-%j.out-%N # name of the stdout, using the job number (%j) and the first node (%N)
 #SBATCH -e dgx_log/slurm-%j.err-%N # name of the stderr, using the job number (%j) and the first node (%N)
-#SBATCH --mem=50G
+#SBATCH --mem=25G
 from future.utils import raise_with_traceback
 import torch
 import sys
@@ -16,7 +16,6 @@ import argparse
 sys.path.append(os.getcwd())
 
 import logging
-
 
 import numpy as np
 np.set_printoptions(threshold=np.inf)
@@ -38,40 +37,13 @@ except:
     
 from configs import configs
 
+configs.load_predefined_set_of_configs('cnn20180628') #'densenet', 'frozen_densenet', 'p1', 'fc20180524', 'cnn20180628'
 
-configs.load_predefined_set_of_configs('fc20180524') #'densenet', 'frozen_densenet', 'p1', 'fc20180524'
-configs['save_model']= True
-configs['N_EPOCHS'] = 50
-configs['BATCH_SIZE'] = 1
-'''
-#configs['training_pipeline']= 'ensemble'
-configs['use_true_predicted']= True
-#configs['pre_transformation'] = 'boxcox'
-configs['N_EPOCHS'] = 50
-configs['use_lateral']= True
-#configs['kind_of_loss']='l1'
-configs['kind_of_loss']='relative_mse'
-configs['network_output_kind']='softplus'
-#configs['labels_to_use'] ='two_ratios'
-configs['labels_to_use'] ='two_predrug_absolute'
-configs['trainable_densenet'] = True
-#configs.load_predefined_set_of_configs('densenet') 
-#configs['output_copd'] =False
-configs['use_extra_inputs']= True
-configs['use_batchnormalization_hidden_layers']= True
-configs['use_random_crops'] = True
-configs['positions_to_use'] = ['PA', 'AP']
-configs['dropout_batch_normalization_last_layer']=True
-configs['densenet_dropout']=0.25
-configs['l2_reg_fc'] = 0.0
-configs['initial_lr_cnn'] = 1e-04
-configs['use_dropout_hidden_layers'] = 0.25
-configs['initial_lr_fc'] = 0.0001
-configs['BATCH_SIZE'] = 22
-#configs['use_copd_definition_as_label'] = True
-#configs['output_copd']= True
-'''
+configs.load_predefined_set_of_configs('resnet18')
 
+configs.load_predefined_set_of_configs('meanvar_loss')
+
+#configs['use_dsnm'] = True
 
 configs.open_get_block_set()
 
@@ -103,6 +75,49 @@ if configs['machine_to_use'] == 'titan':
         raise_with_traceback(ValueError('You should set Cuda Visible Devices (-c or --cvd) when using titan'))
     os.environ['CUDA_VISIBLE_DEVICES'] = args['cvd']
 
+def meanvar_var_loss_calc(output_var, interm_probs_logits, model):
+    bins = model.module.final_layers.final_linear.bins_list
+    losses = []
+    for k in range(len(interm_probs_logits)):
+        size0 = output_var[:,k].size()[0]
+        size1 = bins[k].size()[1]
+        losses.append(torch.mean(torch.sum(nn.Softmax().cuda()(interm_probs_logits[k])*(output_var[:,k].unsqueeze(1).expand(size0, size1) - bins[k].expand(size0, size1))**2, dim = 1), dim = 0) )
+    return sum(losses) #sum?
+
+def meanvar_average_loss_calc(output_var, target_var):
+    losses = []
+    for k in range(target_var.size()[1]):
+        losses.append(nn.MSELoss(size_average = True).cuda()(output_var[:,k], target_var[:,k]))
+    return sum(losses) #sum?
+  
+def round_with_chosen_spacing(tensor, spacing):
+    return torch.round(tensor/float(spacing))*spacing #only working for one non-sero digit spacings
+
+def torch_one_hot(batch,depth):
+    ones = torch.sparse.torch.eye(depth)
+    return ones.index_select(0,batch)
+  
+def meanvar_bce_loss_calc(interm_probs_logits, target_var, model, write):
+    assert(len(interm_probs_logits)==target_var.size()[1])
+    spacing = configs['meanvarloss_discretization_spacing']
+    losses = []
+    bins = model.module.final_layers.final_linear.bins_list
+    for k in range(target_var.size()[1]):
+        rounded_targets = round_with_chosen_spacing(target_var[:,k], spacing)
+        size0 = rounded_targets.size()[0]
+        size1 = bins[k].size()[1]
+        int_targets = (torch.round((rounded_targets - torch.min(bins[k]).expand(size0))/spacing)).long()
+        one_hot_targets = torch.autograd.Variable(torch_one_hot(int_targets.data.cpu(), size1).cuda(async=True, device = 0), requires_grad=False) 
+        #outputs with larger range are impacting more in the loss here, maybe not reduce and then average
+        losses.append(nn.CrossEntropyLoss(size_average = True).cuda()(interm_probs_logits[k], int_targets))
+        if write:
+            np.savetxt('rounded_targetsmean'+str(k)+'.csv', rounded_targets.data.cpu().numpy(), delimiter=',') 
+            np.savetxt('int_targetsmean'+str(k)+'.csv', int_targets.data.cpu().numpy(), delimiter=',') 
+            np.savetxt('one_hot_targetsmean'+str(k)+'.csv', one_hot_targets.data.cpu().numpy(), delimiter=',') 
+    if write:
+        print(sum(losses))
+    return sum(losses) #sum?
+    
 def run_epoch(loaders, model, criterion, optimizer, epoch=0, n_epochs=0, train=True):
     # modified from https://github.com/gpleiss/temperature_scaling
     time_meter = utils.Meter(name='Time', cum=True)
@@ -123,16 +138,30 @@ def run_epoch(loaders, model, criterion, optimizer, epoch=0, n_epochs=0, train=T
         # Forward pass
         input_var, extra_inputs_var, target_var = ((torch.autograd.Variable(var.cuda(async=True, device = 0), volatile=(not train)) 
                                                if (not isinstance(var,(list,))) else None) for var in (input,extra_inputs,target))
+
+        output_var, interm_probs_logits, averages = model(input_var, extra_inputs_var)
         
-        output_var = model(input_var, extra_inputs_var)
-        
-        losses = []
-        
-        for k in range(target.size()[1]):
-            losses.append(criterion[k]['weight']*criterion[k]['loss'](output_var[:,k], target_var[:,k]))
-        loss = sum(losses)
-        
-        #output_var_fixed, target_var_fixed = (x.data.cpu().numpy() for x in (output_var, target_var))
+        if not configs['use_mean_var_loss']:
+            losses = []
+            
+            for k in range(target.size()[1]):
+                losses.append(criterion[k]['weight']*criterion[k]['loss'](output_var[:,k], target_var[:,k]))
+            loss = sum(losses)#just like the comment above: should it be the average here? I probably need to choose a different learning rate for common and non-common variables between outputs  /float(len(losses))
+        else:
+            write = (i==0 and epoch==50) and train and False
+            meanvar_var_loss = meanvar_var_loss_calc(averages, interm_probs_logits, model)
+            meanvar_bce_loss = meanvar_bce_loss_calc(interm_probs_logits, target_var, model, write)
+            meanvar_average_loss = meanvar_average_loss_calc(averages, target_var)
+            loss = configs['multiplier_constant_meanvar_mean_loss']*meanvar_average_loss + configs['multiplier_constant_meanvar_var_loss']*meanvar_var_loss + configs['multiplier_constant_meanvar_bce_loss']*meanvar_bce_loss
+
+            if write:
+                np.savetxt('output_varmean.csv', output_var.data.cpu().numpy(), delimiter=',') 
+                for k in range(target.size()[1]):
+                    np.savetxt('interm_probs_logitsmean'+str(k)+'.csv', interm_probs_logits[k].data.cpu().numpy(), delimiter=',') 
+                np.savetxt('targetmean.csv', target.cpu().numpy(), delimiter=',') 
+                bins = model.module.final_layers.final_linear.bins_list
+                for k in range(target.size()[1]):
+                    print(bins[k])
         output_var_fixed = output_var.data.cpu().numpy()
         target_var_fixed = target.numpy()
         all_target_var_fixed = column_values.numpy()
@@ -155,10 +184,8 @@ def run_epoch(loaders, model, criterion, optimizer, epoch=0, n_epochs=0, train=T
             pass
 
         this_batch_size = len(input)
-        #lossMean += this_batch_size*loss.data.cpu().numpy()
-        lossMean += this_batch_size*loss.data[0]
+        lossMean += this_batch_size*loss.data[0] #alternative to this: lossMean += this_batch_size*loss.data.cpu().numpy()
         lossValNorm += this_batch_size
-    #logging.info('oi1 ' + str(time.time() - start))
     return time_meter.value(), loss_meter.value(), np.atleast_1d(lossMean/lossValNorm), y_corr, y_pred, y_corr_all
 
 def select_columns_one_table_after_merge(df, suffix, keep_columns=[]):
@@ -173,9 +200,9 @@ def get_loader(set_of_images, cases_to_use, all_labels, transformSequence, train
         current_df = set_of_images[i].copy(deep=True)
         current_df.columns = current_df.columns.map(lambda x: ((str(x) + '_'+str(i)) if x not in ['subjectid', 'crstudy'] else str(x)))
         if i == 0:
-            all_joined_table =  pd.merge(cases_to_use, current_df, on=['subjectid', 'crstudy'])#, suffixes=('_cases', '_'+str(i)))
+            all_joined_table =  pd.merge(cases_to_use, current_df, on=['subjectid', 'crstudy'])
         else:
-            all_joined_table = pd.merge(all_joined_table, current_df, on=['subjectid', 'crstudy'])#, suffixes=('_'+str(i-1), '_'+str(i)))
+            all_joined_table = pd.merge(all_joined_table, current_df, on=['subjectid', 'crstudy'])
     for i in range(len(set_of_images)):
         cases_to_use_on_set_of_images.append(pd.merge(select_columns_one_table_after_merge(all_joined_table, '_'+str(i), ['subjectid', 'crstudy']),all_labels, on=['subjectid', 'crstudy']))
         
@@ -215,17 +242,12 @@ def load_training_pipeline(cases_to_use, all_images, all_labels, trainTransformS
         else:
             subjectids = np.array(cases_to_use['subjectid'].unique())
             if configs['use_fixed_test_set']:
-                #prng = np.random.RandomState(83936018)
-                #queue = prng.permutation(subjectids.shape[0])
-                #testids = set(subjectids[queue[:int(0.2*subjectids.shape[0])]])
                 with open('./testsubjectids.pkl') as f:  # Python 3: open(..., 'rb')
                     testids = pickle.load(f)
             else:
                 prng = np.random.RandomState()
                 queue = prng.permutation(subjectids.shape[0])
                 testids = set(subjectids[queue[:int(0.2*subjectids.shape[0])]])
-            #with open('./testsubjectids.pkl', 'w') as f:  # Python 3: open(..., 'wb')
-            #    pickle.dump(testids, f)
 
             test_images = cases_to_use.loc[cases_to_use['subjectid'].isin(testids)]
             train_images = cases_to_use.loc[~cases_to_use['subjectid'].isin(testids)]  
@@ -256,12 +278,6 @@ def load_training_pipeline(cases_to_use, all_images, all_labels, trainTransformS
           'relative_mse':relative_error_mse_loss}
         criterion = [{'loss':losses_dict[configs['get_individual_kind_of_loss'][k]], 'weight':configs['get_individual_loss_weights'][k]} for k in configs['get_labels_columns']]
 
-        '''
-        optimizer = optim.Adam( [
-          {'params':model.module.fc.parameters(), 'lr':configs['initial_lr_fc'], 'weight_decay':configs['l2_reg_fc']}, 
-          {'params':model.module.cnn.parameters(), 'lr':configs['initial_lr_cnn'], 'weight_decay':configs['l2_reg_cnn']}
-          ], lr=configs['initial_lr_fc'] , weight_decay=configs['l2_reg_fc'])
-        '''
         optimizer = optim.Adam( [
           {'params':model.module.final_layers.parameters(), 'lr':configs['initial_lr_fc'], 'weight_decay':configs['l2_reg_fc']}, 
           {'params':model.module.cnn.parameters(), 'lr':configs['initial_lr_cnn'], 'weight_decay':configs['l2_reg_cnn']}
@@ -304,7 +320,26 @@ def train(models, criterions, optimizers, schedulers, train_loaders, test_loader
         concatenate_funcation = lambda x,y: concat_with_expansion(x,y, 0)
     elif configs['training_pipeline']=='ensemble':
         concatenate_funcation = lambda x,y: concat_with_expansion(x,y, 2)
+    
+    if configs['use_dsnm']:
+        for i in training_range:
                 
+            model = models[i]
+            criterion = criterions[i]
+            optimizer = optimizers[i]
+            train_loader = train_loaders[i]
+            test_loader = test_loaders[i]
+            _, _, _, _, _, _ = run_epoch(
+                              loaders=eval_train_loader,
+                              model=model,
+                              criterion=criterion,
+                              optimizer=None,
+                              epoch=-1,
+                              n_epochs=n_epochs,
+                              train=False
+                            )
+            model.module.final_layers.fc_part.initialize()
+    
     for epoch in range(1, n_epochs + 1):    
 
         all_val_losses =np.array([])
@@ -339,7 +374,7 @@ def train(models, criterions, optimizers, schedulers, train_loaders, test_loader
                 train=False
                 )
             
-            if epoch==n_epochs:
+            if epoch==n_epochs or True:
                 _, _, _, y_corr_train, y_pred_train, y_corr_all_train = run_epoch(
                       loaders=eval_train_loader,
                       model=model,
@@ -361,8 +396,9 @@ def train(models, criterions, optimizers, schedulers, train_loaders, test_loader
         logging.info('Train loss ' + str(epoch) + '/' + str(n_epochs) + ': ' +str(np.average(all_train_losses)))
         logging.info('Val loss ' + str(epoch) + '/' + str(n_epochs) + ': '+str(np.average(all_val_losses)))
         
-        if epoch==n_epochs:
-            save_model(models)
+        if epoch==n_epochs or True:
+            if configs['save_model'] and epoch==n_epochs:
+                save_model(models)
             if configs['training_pipeline']=='ensemble':
                 ys_corr_train, ys_pred_train, ys_corr_all_train, ys_corr_test, ys_pred_test, ys_corr_all_test = \
                   ( np.mean(x, axis = 2) for x in (ys_corr_train,ys_pred_train,ys_corr_all_train, ys_corr_test,ys_pred_test, ys_corr_all_test))
@@ -396,12 +432,12 @@ def main():
     
     models, criterions, optimizers, schedulers, train_loaders, test_loaders, eval_train_loader = load_training_pipeline(cases_to_use, all_images, all_labels, trainTransformSequence, testTransformSequence, num_ftrs)
     
-    load_model(models, 'model20180525-162109-1987')
-    '''
-    for i, model in enumerate(models):
-        visualization.GradCAM(model).execute(test_loaders[i])
-        1/0
-    '''
+    visualize = False
+    if visualize:
+        load_model(models, 'model20180606-113606-4579')
+        for i, model in enumerate(models):
+            visualization.GradCAM(model).execute(test_loaders[i])
+
     train(models, criterions, optimizers, schedulers, train_loaders, test_loaders, eval_train_loader)
     
 if __name__ == '__main__':

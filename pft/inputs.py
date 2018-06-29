@@ -10,6 +10,7 @@ import torchvision.transforms as transforms
 import image_preprocessing
 import numpy as np
 from PIL import Image
+import model_loading
 
 try:
     import cPickle as pickle
@@ -81,10 +82,8 @@ def get_name_pickle_file():
             size_all_images = '256_256'
         else:
             size_all_images = '224_224'
-    elif configs['remove_pre_avg_pool']:
-        size_all_images = '7_7'
     else:
-        size_all_images = '1_1'
+        size_all_images = '7_7'
     return '/home/sci/ricbl/Documents/projects/radiology-project/pft/all_images_' +  size_all_images + '_prot2.pkl'
   
 class DatasetGenerator(Dataset):
@@ -159,8 +158,6 @@ class DatasetGenerator(Dataset):
             extra_inputs = []
         
         
-        print(filepath)
-        print()
         #self.transform = transforms.ToTensor()
         return imageData, imageLabel, imageAllColumns, extra_inputs, filepath
     
@@ -210,6 +207,7 @@ def get_labels():
     all_labels[percentage_labels] = all_labels[percentage_labels] /100.
     if configs['use_copd_definition_as_label']:
         all_labels['copd'] = (all_labels['fev1fvc_predrug']< 0.7)*1
+    configs['pre_transform_labels'].set_pre_transformation_labels(all_labels)
     all_labels = configs['pre_transform_labels'].apply_transform(all_labels)
     return all_labels
 
@@ -231,7 +229,7 @@ def get_all_images():
         file_with_image_filenames = 'train.txt'
     else:
         file_with_image_filenames = 'train2.txt'
-    num_ftrs = 1024
+    num_ftrs = None
     list_pretransforms =[]
     if (not configs['load_image_features_from_file']) or configs['trainable_densenet']:
         normalize = transforms.Normalize([0.485, 0.456, 0.406],
@@ -257,10 +255,10 @@ def get_all_images():
         '''
         
     if (not configs['trainable_densenet']) and (not configs['load_image_features_from_file']):
-        chexnetModel = models.load_pretrained_chexnet()
-        num_ftrs = chexnetModel.module.densenet121.classifier[0].in_features
+        chexnetModel = model_loading.load_pretrained_chexnet()
+        num_ftrs = chexnetModel.module.model.classifier[0].in_features
         
-        chexnetModel.module.densenet121.classifier = nn.Sequential()
+        chexnetModel.module.model.classifier = torch.nn.Sequential()
         chexnetModel = chexnetModel.cuda()  
 
         list_pretransforms.append(image_preprocessing.ChexnetEncode(chexnetModel))
@@ -273,7 +271,8 @@ def get_all_images():
             pickle.dump(all_images, f, protocol=2)
     elif (not configs['trainable_densenet']) and (configs['load_image_features_from_file']):
         all_images = pd.read_pickle(get_name_pickle_file())
-
+        image_shape = all_images['preprocessed'][0][0].shape
+        num_ftrs = image_shape[0]
     all_images['image_index'] = all_images.index
     
     if (configs['trainable_densenet'] and (configs['load_image_features_from_file'])):

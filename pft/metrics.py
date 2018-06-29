@@ -101,9 +101,20 @@ def sum_dictionaries_by_key(x,y):
     return {k: x.get(k, 0) + y.get(k, 0) for k in set(x) | set(y)}
   
 def get_precision_recall_from_dictionary(d):
-    precision = d['tp']/float(d['tp']+d['fp'])
-    recall = d['tp']/float(d['tp']+d['fn'])
-    f1score = 2*precision*recall/(precision+recall)
+    try:
+        precision = d['tp']/float(d['tp']+d['fp'])
+    except FloatingPointError:
+        precision = 0
+        print(float(d['tp']+d['fp']))
+    try:
+        recall = d['tp']/float(d['tp']+d['fn'])
+    except FloatingPointError:
+        recall = 0
+        print(float(d['tp']+d['fn']))
+    try:
+        f1score = 2*precision*recall/(precision+recall)
+    except FloatingPointError:
+        f1score = 0
     accuracy = (d['tp']+d['tn'])/float(d['tp']+d['fp']+d['fn']+d['tn'])
     return {'precision':precision, 'recall':recall, 'f1score':f1score, 'accuracy': accuracy}
   
@@ -129,6 +140,10 @@ def get_accuracies(y_corr, y_pred):
     accuracies['accuracy'] = (perfs['tn']+perfs['tp'])/float(perfs['tn']+perfs['tp']+perfs['fp']+perfs['fn'])
     return accuracies
 
+def mae(y_corr, y_pred):
+    result = np.mean(np.square(y_pred-y_corr))
+    return result
+  
 def report_final_results(y_corr , y_pred, y_corr_all, train):
     if train:
         train_string = 'train'
@@ -140,7 +155,7 @@ def report_final_results(y_corr , y_pred, y_corr_all, train):
     plot_results(y_corr, y_pred, y_corr_all, train_string)
     plot_results(y_corr, y_pred, y_corr_all, train_string, is_error_plot = True)
         
-    r2s = {}
+    regression_metrics = {}
     correlations = {}
     output_variables = list(set(sum(configs['pft_plot_columns'],[])))
     accuracies = {}
@@ -148,15 +163,16 @@ def report_final_results(y_corr , y_pred, y_corr_all, train):
         name = output_variables[k]
         this_y_corr = absolutes_and_important_ratios_plot_calc(y_corr, y_corr_all, name)
         this_y_pred = absolutes_and_important_ratios_plot_calc(y_pred, y_corr_all, name)
-        r2s[name] = r2(y_corr = this_y_corr, y_pred = this_y_pred)
+        regression_metrics[name] = {'r2':r2(y_corr = this_y_corr, y_pred = this_y_pred), 'mae':mae(y_corr = this_y_corr, y_pred = this_y_pred)}
         #print('sklearn: ' + str(sklearn.metrics.r2_score(y_true = configs['pft_plot_function'](y_corr,k), y_pred = configs['pft_plot_function'](y_pred,k))))
         #print('numpy: ' + str(r2s[name]))
+        #print(this_y_corr)
+        #print(this_y_pred)
         pearson, pvalue = scipy.stats.pearsonr(this_y_corr, this_y_pred)
-        correlations[name] = {'pearson':pearson, 'pvalue':pvalue}
+        regression_metrics[name]['correlation statistical test'] = {'pearson':pearson, 'pvalue':pvalue}
         if name == 'fev1fvc_predrug':
             accuracies['copd_from_pft'] = get_accuracies(get_copd_diagnose(this_y_corr),  get_copd_diagnose(this_y_pred)) 
-    logging.info('r2: ' + str(r2s))
-    logging.info('correlation statistical test: ' + str(correlations))
+    logging.info('regression_metrics: ' + str(regression_metrics))
     if len(configs['get_labels_columns_copd'])>0:
         accuracies[configs['get_labels_columns_copd'][0]] = get_accuracies(absolutes_and_important_ratios_plot_calc(y_corr, y_corr_all, 'copd') ,  absolutes_and_important_ratios_plot_calc(y_pred, y_corr_all, 'copd')) 
     logging.info('accuracy: ' + str(accuracies))
