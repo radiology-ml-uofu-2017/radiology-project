@@ -30,23 +30,33 @@ def write_filenames():
 
 def read_filename(line):
     thisimage = {}
+
     lineItems = line.split()
     thisimage['filepath'] = lineItems[0]
     splitted_filepath = thisimage['filepath'].replace('\\','/').split("/")
+    if splitted_filepath[-1] in [ 'PFT_000263_CRStudy_15_ScanID_1-W_Chest_Lat.png', 'PFT_000264_CRStudy_05_ScanID_2-W_Chest_Lat.png']:
+        return None
     splitted_ids = splitted_filepath[-1].replace('-','_').replace('.','_').split('_')
     thisimage['subjectid'] = int(splitted_ids[1])
     thisimage['crstudy'] = int(splitted_ids[3])
-    thisimage['scanid'] = int(splitted_ids[5])
-    
+    try:
+        thisimage['scanid'] = int(splitted_ids[5])
+    except ValueError:
+        return None
     position = splitted_ids[-2].upper()
-    if 'LAT' in position:
+    if 'LARGE' in position:
+        if configs['use_images_with_position_LARGE']:
+            position = splitted_ids[-3].upper()
+        else:
+            return None
+    if 'STANDING' in position:
+        position = splitted_ids[-3].upper()
+    elif 'LAT' in position:
         position = 'LAT'
     elif 'PA' in position:
         position = 'PA'
     elif 'AP' in position:
         position = 'AP'
-    elif 'LARGE' in position:
-        return None
     elif 'SUPINE' in position:
         return None
     elif 'CHEST' in position:
@@ -54,6 +64,8 @@ def read_filename(line):
     elif 'P' == position and  splitted_ids[-3].upper() == 'A':
         position = 'AP'
     elif 'PORTRAIT' in position:
+        return None
+    elif 'SID' in position:
         return None
     else:
         raise_with_traceback(ValueError('Unknown position: '+position + ', for file: ' +  lineItems[0]))
@@ -74,8 +86,12 @@ def read_filenames(pathFileTrain):
           if thisimage is not None:
               listImage.append(thisimage)
     fileDescriptor.close()
-    return pd.DataFrame(listImage)
+    return listImage
 
+def get_name_h5_file():
+    return get_name_pickle_file()[:-3]+'h5'
+    #return 'all_images_224_224_prot2.2.h5'
+  
 def get_name_pickle_file():
     if configs['trainable_densenet']:
         if configs['use_random_crops']: 
@@ -84,19 +100,14 @@ def get_name_pickle_file():
             size_all_images = '224_224'
     else:
         size_all_images = '7_7'
-    return '/home/sci/ricbl/Documents/projects/radiology-project/pft/all_images_' +  size_all_images + '_prot2.pkl'
+    return '/home/sci/ricbl/Documents/projects/radiology-project/pft/images_'+''.join(configs['data_to_use'])+'_' +  size_all_images + '_prot3.pkl'
   
 class DatasetGenerator(Dataset):
     def __init__ (self, pathDatasetFile, transform = None):
         super(DatasetGenerator, self).__init__()
         self.listImage = pathDatasetFile
-        
         if configs['trainable_densenet'] and configs['load_image_features_from_file']:
-            if configs['use_random_crops']: 
-                size_all_images = '256_256'
-            else:
-                size_all_images = '224_224'
-            self.file = h5py.File('./all_images_'+size_all_images+'_prot2.2.h5', 'r')
+            self.file = h5py.File(get_name_h5_file(), 'r')
             
             #much slower
             #store = Store('all_images_224_224_prot2.2.h5df', mode="r")
@@ -167,11 +178,12 @@ class DatasetGenerator(Dataset):
 def get_labels():
     #selects sets of data to use
     if configs['use_set_29']:
-        file_with_labels = './labels.csv'
+        files_with_labels = ['./labels.csv']
     else:
-        file_with_labels = '/usr/sci/projects/DeepLearning/Tolga_Lab/Projects/Project_JoyceSchroeder/data/data_PFT/data_EDW_clean_Clem/Chest_Xray_20180316_Clem_clean_ResearchID_PFTValuesAndInfo_noPHI.csv'
-    
-    all_labels = pd.read_csv(file_with_labels)
+        file_root = '/usr/sci/projects/DeepLearning/Tolga_Lab/Projects/Project_JoyceSchroeder/data/data_PFT/MetaData/MetaData_'
+        file_end = {'2012-2016':'2012-2016/Chest_Xray_2012-2016_TJ_clean_ResearchID_PFTValuesAndInfo_No_PHI.csv', '2017':'2017/Chest_Xray_20180316_Clem_clean_ResearchID_PFTValuesAndInfo_noPHI.csv'}
+        files_with_labels = [ file_root + file_end[dataset] for dataset in configs['data_to_use']]
+    all_labels = pd.concat([pd.read_csv(file_with_labels) for file_with_labels in files_with_labels])
     all_labels['fev1_diff'] = all_labels['Predicted FEV1'] - all_labels['Pre-Drug FEV1']
     all_labels['fvc_diff'] = all_labels['Predicted FVC'] - all_labels['Pre-Drug FVC']
     
@@ -198,7 +210,8 @@ def get_labels():
     'Never Assessed':5,
     'Current Some Day Smoker':6,
     'Heavy Tobacco Smoker':7,
-    'Unknown If Ever Smoked':5}
+    'Unknown If Ever Smoked':5,
+    'Smoker, Current Status Unknown':5}
     }, inplace = True)
   
     all_labels = pd.concat([all_labels,pd.get_dummies(all_labels['tobacco_status'], prefix='tobacco_status').astype('float')],axis=1)
@@ -226,9 +239,10 @@ def count_unique_images_and_pairs(images_to_use, all_examples):
 def get_all_images():
         #selects sets of data to use
     if configs['use_set_29']:
-        file_with_image_filenames = 'train.txt'
+        files_with_image_filenames = ['train.txt']
     else:
-        file_with_image_filenames = 'train2.txt'
+        #files_with_image_filenames = ['train2.txt']
+        files_with_image_filenames = [ 'images' + str(dataset) + '.txt' for dataset in configs['data_to_use']]
     num_ftrs = None
     list_pretransforms =[]
     if (not configs['load_image_features_from_file']) or configs['trainable_densenet']:
@@ -245,14 +259,24 @@ def get_all_images():
                   transforms.ToTensor(),
                   normalize]
         
-        all_images = read_filenames('/home/sci/ricbl/Documents/projects/radiology-project/pft/' + file_with_image_filenames)
+        all_images = []
+        for file_with_image_filenames in files_with_image_filenames:
+            all_images = all_images + read_filenames('/home/sci/ricbl/Documents/projects/radiology-project/pft/' + file_with_image_filenames)
+        
+        all_images = pd.DataFrame(all_images)
         
         '''
         transformSequence = transforms.Compose(list_pretransforms)
         all_images = image_preprocessing.preprocess_images(all_images, transformSequence)
+        #h5f = h5py.File(get_name_h5_file(), 'w')
+        #h5f.create_dataset('dataset_1', data=np.array(all_images.preprocessed.tolist()))
+        #h5f.close()
+        
+        
         with open(get_name_pickle_file(), 'wb') as f:
             pickle.dump(all_images, f, protocol=2)
         '''
+        
         
     if (not configs['trainable_densenet']) and (not configs['load_image_features_from_file']):
         chexnetModel = model_loading.load_pretrained_chexnet()

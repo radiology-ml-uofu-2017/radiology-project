@@ -2,7 +2,41 @@ from torch.optim import Optimizer
 from functools import partial
 import torch 
 import logging 
+import re
+import torch.nn.functional as F
 
+def merge_two_dicts(x, y):
+    if x is None:
+        return y
+    z = x.copy()
+    z.update(y)
+    return z
+
+def cmp(a, b):
+    return (a > b) - (a < b)
+  
+def compare_versions(version1, version2):
+    def normalize(v):
+        return [int(x) for x in re.sub(r'(\.0+)*$','', v).replace("_",".").split(".")]
+    return cmp(normalize(version1), normalize(version2))
+
+def downsampling(x, size=None, scale_factor=None, mode='nearest'):
+#modified from https://discuss.pytorch.org/t/autogradable-image-resize/580/7
+        # define size if user has specified scale_factor
+        if size is None: size = (int(scale_factor*x.size(2)), int(scale_factor*x.size(3)))
+        # create coordinates
+        h = torch.arange(0,size[0]) / (size[0]-1) * 2 - 1
+        w = torch.arange(0,size[1]) / (size[1]-1) * 2 - 1
+        # create grid
+        grid = torch.zeros(size[0],size[1],2)
+        grid[:,:,0] = w.unsqueeze(0).repeat(size[0],1)
+        grid[:,:,1] = h.unsqueeze(0).repeat(size[1],1).transpose(0,1)
+        # expand to match batch size
+        grid = grid.unsqueeze(0).repeat(x.size(0),1,1,1)
+        if x.is_cuda: grid = grid.cuda()
+        # do sampling
+        return F.grid_sample(x, grid, mode=mode)
+      
 #modified from pytorch sourcecode
 class ReduceLROnPlateau(object):
     """Reduce learning rate when a metric has stopped improving.

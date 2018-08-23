@@ -206,7 +206,11 @@ class ChexnetEncode(object):
         self.model = model
 
     def __call__(self, tensor):
+        if utils.compare_versions(torch.__version__, '0.4.0')>=0:
+            torch.set_grad_enabled(False)
         input_var = torch.autograd.Variable(tensor.view(1,3,224,224), volatile=True)
+        if utils.compare_versions(torch.__version__, '0.4.0')>=0:
+            torch.set_grad_enabled(True)
         out = self.model(input_var)
         return [np.squeeze(np.transpose(out.data.cpu().numpy(), (0,1,2,3)),axis = 0)]
 
@@ -215,6 +219,13 @@ class ChexnetEncode(object):
 
 def preprocess_image(imagePath, transform):
     imageData = Image.open(imagePath)
+    '''
+    try:
+        imageData = Image.open(imagePath)
+    except IOError:
+        print('Not possible to open this image: ' + imagePath)
+        return None
+    '''
     return transform(imageData)
         
 def preprocess_images(all_images, transformations):

@@ -15,18 +15,12 @@ import os
 from sklearn.decomposition import PCA
 import h5py
 from collections import Counter
+import utils
+import math
 
 np.seterr(divide = "raise", over="warn", under="warn",  invalid="raise")
 
 labels_columns = configs['get_labels_columns']
-
-def cmp(a, b):
-    return (a > b) - (a < b)
-  
-def compare_versions(version1, version2):
-    def normalize(v):
-        return [int(x) for x in re.sub(r'(\.0+)*$','', v).split(".")]
-    return cmp(normalize(version1), normalize(version2))
   
 def load_checkpoint(model):
     if configs['CKPT_PATH'] is not None:
@@ -45,7 +39,7 @@ def load_checkpoint(model):
             for key in list(state_dict.keys()):
                 res = pattern.match(key)
                 new_key = key
-                if res and compare_versions(torchvision.__version__, '0.2.1')>=0:
+                if res and utils.compare_versions(torchvision.__version__, '0.2.1')>=0:
                     new_key = res.group(1) + res.group(2)
                 new_key = new_key.replace('densenet121', 'model')
                 state_dict[new_key] = state_dict[key]
@@ -83,23 +77,29 @@ class FinalLayers(nn.Module):
         super(FinalLayers, self).__init__()
         self.n_inputs = n_inputs
         self.spatial_part = ModelSpatialToFlatPart(num_ftrs*self.n_inputs)
-        if not configs['use_dsnm']:
+        
+        if configs['fully_connected_kind'] == 'fully_connected':
             self.fc_part = ModelFCPart(self.spatial_part.current_n_channels)
-        else:
+        elif configs['fully_connected_kind'] == 'dsnm':
             self.fc_part = ModelDSNMPart(self.spatial_part.current_n_channels) 
-        self.final_linear = ModelLastLinearLayer(self.fc_part.current_n_channels)
+        elif configs['fully_connected_kind'] == 'softmax_gate':
+            self.fc_part = ModelInternalClassSelection(self.spatial_part.current_n_channels)
+        print(self.fc_part.current_n_channels)
+        self.final_linear = ModelLastLinearLayer(self.fc_part.current_n_channels)#527)
     
-    def forward(self, x, extra_fc_input ):
+    def forward(self, x, extra_fc_input, epoch ):
         x = self.spatial_part(x)
-        x = self.fc_part(x, extra_fc_input)
-
-        return self.final_linear(x)
+        #x, ws = self.fc_part(x, extra_fc_input, epoch)
+        x, extra_outs = self.fc_part(x, extra_fc_input)
+        x, extra_outs2 = self.final_linear(x)
+        return x, utils.merge_two_dicts(extra_outs,extra_outs2)
       
 class ModelMoreInputs(nn.Module):
     def __init__(self, num_ftrs):
         super(ModelMoreInputs, self).__init__()
         
         self.n_inputs, self.n_cnns = get_qt_inputs()
+        self.stn = STN()
         
         cnns = []
         for i in range(self.n_cnns):
@@ -112,7 +112,7 @@ class ModelMoreInputs(nn.Module):
         self.cnn = nn.ModuleList(cnns)
         self.final_layers = FinalLayers(num_ftrs, self.n_inputs)
         
-    def forward(self, images, extra_fc_input ):
+    def forward(self, images, extra_fc_input, epoch ):
         all_outputs = []
         if not images.size()[1]==self.n_inputs:
             raise_with_traceback(ValueError('Wrong number of arguments for the model forward function. Expected ' + str(self.n_inputs) + ' and received ' + str(args.size()[1])))
@@ -121,11 +121,103 @@ class ModelMoreInputs(nn.Module):
                 index = 0
             else:
                 index = i
-            all_outputs.append(self.cnn[index](images[:,i,...]))
-        x, probs, averages = self.final_layers(all_outputs, extra_fc_input)
+            if configs['use_spatial_transformer_network']:
+                xi = self.stn(images[:,i,...].contiguous())
+            else:
+                xi = images[:,i,...]
+            xi = self.cnn[index](xi)
+            all_outputs.append(xi)
+        x, extra_outs = self.final_layers(all_outputs, extra_fc_input, epoch)
 
-        return x, probs, averages
+        return x, extra_outs
 
+def my_eye_(tensor):
+    with torch.no_grad():
+        tensor = torch.eye(2,3, requires_grad=tensor.requires_grad).view(tensor.size(0))
+    return tensor
+  
+class LocationNetwork(nn.Module):
+    def __init__(self, w_h):
+        super(LocationNetwork, self).__init__()
+        self.current_n_channels = 3
+        self.location_part = torch.nn.Sequential()
+        
+        '''
+        for layer_i in range(int(math.log(w_h/7., 2))): 
+            if configs['use_batchnormalization_location']:
+                self.location_part.add_module("location_bn_"+str(layer_i),torch.nn.BatchNorm2d(self.current_n_channels).cuda())
+            self.location_part.add_module("location_drop_"+str(layer_i),nn.Dropout(p=configs['use_dropout_location']).cuda())
+            self.location_part.add_module("location_conv_"+str(layer_i),nn.Conv2d(self.current_n_channels, configs['channels_location'], kernel_size = 5, stride=1, padding=2, dilation=1, groups=1, bias=True)) 
+            self.current_n_channels = configs['channels_location']
+            self.location_part.add_module("location_nonlinearity_"+str(layer_i),nn.ReLU().cuda())
+            self.location_part.add_module("location_pool_"+str(layer_i),nn.MaxPool2d(kernel_size=2, stride=2, padding=0, dilation=1, return_indices=False, ceil_mode=False))
+        #current_model.add_module("pool_"+str(layer_i),nn.AvgPool2d(kernel_size=7, stride=7, padding=0, ceil_mode=False, count_include_pad=True))
+        self.location_part.add_module("location_flatten",Flatten().cuda())
+        self.current_n_channels = self.current_n_channels*7*7
+        self.location_part.add_module("location_linear_0",nn.Linear(self.current_n_channels, configs['channels_location'] ).cuda()) 
+        self.current_n_channels = configs['channels_location']
+        self.location_part.add_module("location_fc_nonlinearity_0",nn.ReLU().cuda())
+        self.location_part.add_module("location_linear_1",nn.Linear(self.current_n_channels, configs['channels_location'] ).cuda()) 
+        self.current_n_channels = configs['channels_location']
+        self.location_part.add_module("location_fc_nonlinearity_1",nn.ReLU().cuda())
+        self.linear_out = nn.Linear(self.current_n_channels, 6).cuda()
+        '''
+        '''
+        self.location_part.add_module("location_conv_0",nn.Conv2d(3, 32, kernel_size = 5, stride=1, padding=2,bias=True)) 
+        self.location_part.add_module("location_nonlinearity_0",nn.ReLU().cuda())
+        self.location_part.add_module("location_pool_0",nn.MaxPool2d(kernel_size=2, stride=2, padding=0, dilation=1, return_indices=False, ceil_mode=False))
+        self.location_part.add_module("location_conv_1",nn.Conv2d(32, 32, kernel_size = 5, stride=1, padding=2,bias=True)) 
+        self.location_part.add_module("location_nonlinearity_1",nn.ReLU().cuda())
+        self.location_part.add_module("location_flatten",Flatten().cuda())
+        self.location_part.add_module("location_linear_0",nn.Linear(16*16*32, 32 ).cuda()) 
+        self.location_part.add_module("location_fc_nonlinearity_0",nn.ReLU().cuda())
+        self.location_part.add_module("location_linear_1",nn.Linear(32, 32 ).cuda()) 
+        self.location_part.add_module("location_fc_nonlinearity_1",nn.ReLU().cuda())
+        self.linear_out = nn.Linear(32, 6).cuda()
+        '''
+        
+        self.location_part.add_module("location_conv_0",nn.Conv2d(3, 18, kernel_size = 5, stride=1, padding=0,bias=True)) 
+        self.location_part.add_module("location_nonlinearity_0",nn.ReLU().cuda())
+        self.location_part.add_module("location_pool_0",nn.MaxPool2d(kernel_size=2, stride=2, padding=0, dilation=1, return_indices=False, ceil_mode=False))
+        self.location_part.add_module("location_conv_1",nn.Conv2d(18, 16*3, kernel_size = 5, stride=1, padding=0,bias=True)) 
+        self.location_part.add_module("location_nonlinearity_1",nn.ReLU().cuda())
+        self.location_part.add_module("location_pool_1",nn.MaxPool2d(kernel_size=2, stride=2, padding=0, dilation=1, return_indices=False, ceil_mode=False))
+        self.location_part.add_module("location_flatten",Flatten().cuda())
+        self.location_part.add_module("location_linear_0",nn.Linear(5*5*16*3, 120 ).cuda()) 
+        self.location_part.add_module("location_fc_nonlinearity_0",nn.ReLU().cuda())
+        self.location_part.add_module("location_linear_1",nn.Linear(120, 55 ).cuda()) 
+        self.location_part.add_module("location_fc_nonlinearity_1",nn.ReLU().cuda())
+        self.linear_out = nn.Linear(55, 6).cuda()
+        
+        torch.nn.init.constant_(self.linear_out.weight, 0.0)
+        self.linear_out.bias = torch.nn.Parameter(my_eye_(self.linear_out.bias))
+        '''
+        self.linear_out.weight.data.zero_()
+        self.linear_out.bias.data.copy_(torch.tensor([1, 0, 0, 0, 1, 0], dtype=torch.float))
+        '''
+    def forward(self, x):
+        x = utils.downsampling(x, (32,32), None, 'bilinear')
+        x = self.location_part(x)
+        x = self.linear_out(x)
+        return x
+
+class STN(nn.Module):
+    def __init__(self, w_h=224):
+        super(STN, self).__init__()
+        if configs['use_spatial_transformer_network']:
+            self.localisation = LocationNetwork(w_h)
+        else:
+            self.localisation = nn.Sequential()
+    def forward(self, x):
+        if configs['use_spatial_transformer_network']:
+            theta = self.localisation(x)
+            theta = theta.view(-1, 2, 3)
+            print(theta)
+            grid = F.affine_grid(theta, x.size())
+            x = F.grid_sample(x, grid)
+
+        return x
+      
 def get_spatial_part_fc(num_ftrs):
     spatial_part = torch.nn.Sequential()
     spatial_part.add_module("spatial_output",torch.nn.Sequential())
@@ -150,7 +242,9 @@ class MeanVarLossMean(nn.Module):
         self.bins = bins
         
     def forward(self, input):
-        x = torch.sum(input*self.bins.expand_as(input), dim = 1).squeeze(1)
+        x = torch.sum(input*self.bins.expand_as(input), dim = 1)
+        if len(x.size())>1:
+            x = x.squeeze(1)
         return x
 
 class MeanVarLossOutput(nn.Module):
@@ -166,7 +260,10 @@ class MeanVarLossOutput(nn.Module):
             
             intermediary_probabilities_list.append(one_output)
             one_output = nn.Sequential()
-            one_output.add_module('logits_to_probs', nn.Softmax())
+            if utils.compare_versions(torch.__version__, '0.4.0')>=0:
+                one_output.add_module('logits_to_probs', nn.Softmax(dim = 1))
+            else:
+                one_output.add_module('logits_to_probs', nn.Softmax())
             one_output.add_module('probs_to_mean', MeanVarLossMean(output_column_name, bins[index]))
             outputs_list.append(one_output)
         self.intermediary_probabilities_module_list = nn.ModuleList(intermediary_probabilities_list)
@@ -178,11 +275,15 @@ class MeanVarLossOutput(nn.Module):
         size0 = input.size()[0]
         argmax_list = []
         for index, output_column_name in enumerate(configs['get_labels_columns']):
+            #TODO: if output kind is sigmoid, or maybe if output is copd, skip next two lines 
             intermediary_logits_one_output = self.intermediary_probabilities_module_list[index](input)
             intermediary_logits_list.append(intermediary_logits_one_output)
             one_output = self.outputs_module_list[index](intermediary_logits_one_output)
             outputs_list.append(one_output)
-            argmax_list.append(torch.index_select(self.bins[index], dim = 1, index = torch.max(intermediary_logits_one_output, dim=1)[1].squeeze(1)).squeeze(0))
+            max_probs = torch.max(intermediary_logits_one_output, dim=1)[1]
+            if len(max_probs.size())>1:
+                max_probs = max_probs.squeeze(1)
+            argmax_list.append(torch.index_select(self.bins[index], dim = 1, index = max_probs).squeeze(0))
         distribution_averages = torch.stack(outputs_list,dim = 1)
         outputs = distribution_averages
         return outputs, intermediary_logits_list, distribution_averages
@@ -207,7 +308,6 @@ def multiply_in_groups(input, n_groups):
 class PCAForward(nn.Module):
     def __init__(self, pca):
         super(PCAForward, self).__init__()
-        
         self.weight = torch.nn.Parameter(torch.from_numpy(pca.components_).cuda())
         self.bias = torch.nn.Parameter(torch.from_numpy(np.expand_dims(pca.mean_,axis = 0)).cuda())
         
@@ -223,12 +323,14 @@ class ModelDSNMPart(nn.Module):
         self.current_n_channels = in_features
         self.n_groups = configs['dsnm_n_groups']
         if configs['use_pca_dsnm']:
-            linear_input_features = configs['dsnm_pca_size']
+            #linear_input_features = configs['dsnm_pca_size']
+            linear_input_features = self.current_n_channels
         else:   
             linear_input_features = self.current_n_channels
         self.dsnm = nn.Sequential(nn.Linear(linear_input_features, self.n_groups*(self.n_groups-1)),MultiplyInGroups(self.n_groups))        
         self.current_n_channels = self.n_groups
-        
+        if configs['use_extra_inputs']:
+            self.current_n_channels = self.current_n_channels+15
         self.initialized = False
         self.acumulated_x = None
         
@@ -246,7 +348,7 @@ class ModelDSNMPart(nn.Module):
         else:
             pcaed_images = preprocessed_images
          
-        w,b, self.kmeans = get_unsupervised_weights(pcaed_images, self.n_groups, 'dsnmkmeansout')
+        w,b, self.kmeans = get_unsupervised_weights(pcaed_images, self.n_groups, 'dsnmkmeansout', self.pca)
         
         self.dsnm.apply(lambda tensor: init_k_means(tensor, w, b))
         
@@ -258,13 +360,16 @@ class ModelDSNMPart(nn.Module):
                 self.acumulated_x = x.data.cpu().numpy()
             else:
                 self.acumulated_x = np.concatenate((self.acumulated_x, x.data.cpu().numpy()), axis=0)
-            return (x*0)[:,0:self.current_n_channels]
+            return (x*0)[:,0:self.current_n_channels], None
         if configs['use_pca_dsnm']:
             x = self.pca_forward(x)
-
+        #print(Counter(self.kmeans.predict(x.data.cpu().numpy())))
+        #print(Counter(self.kmeans.predict(self.pca_forward(x).data.cpu().numpy())))
         x = self.dsnm(x)
-
-        return x
+        #print(torch.max(x, dim = 1)[1])
+        if extra_fc_input is not None:
+            x = torch.cat((extra_fc_input,x),1)
+        return x, {'ws':None,'vs':None}
     
 class ModelSpatialToFlatPart(nn.Module):
     def __init__(self, num_ftrs):
@@ -292,8 +397,14 @@ class ModelSpatialToFlatPart(nn.Module):
 class ModelLastLinearLayer(nn.Module):
     def __init__(self, current_n_channels):
         super(ModelLastLinearLayer, self).__init__()
-        self.final_linear_layer = torch.nn.Sequential()
         self.current_n_channels = current_n_channels
+        self.final_linear_layer = torch.nn.Sequential()
+        
+        if configs['dropout_batch_normalization_last_layer']:
+            if configs['use_batchnormalization_hidden_layers']:
+                self.final_linear_layer.add_module("bn_out",torch.nn.BatchNorm1d(self.current_n_channels).cuda())
+            self.final_linear_layer.add_module("drop_out",nn.Dropout(p=configs['use_dropout_hidden_layers']).cuda())
+        
         if configs['use_mean_var_loss']:
             self.bins_list = []
             for index, col_name in enumerate(configs['get_labels_columns']):
@@ -327,11 +438,17 @@ class ModelLastLinearLayer(nn.Module):
             raise_with_traceback(ValueError('There are output kinds in configs["individual_output_kind"] or configs["network_output_kind"] that are not one of: linear, sigmoid and softplus: ' + str(unrecognized_kinds_of_outputs)))
         all_masked_outputs = []
         for output_kind in list(dic_output_kinds.keys()):
+            if utils.compare_versions(torch.__version__, '0.4.0')>=0:
+                torch.set_grad_enabled(False)
             mask = torch.autograd.Variable(torch.FloatTensor(np.repeat(np.expand_dims([(1.0 if output_kind_each_output[k] == output_kind else 0.0) for k in range(len(output_kind_each_output))], axis = 0), dic_output_kinds[output_kind](x).size()[0], axis=0)).cuda(), volatile = False)
+            if utils.compare_versions(torch.__version__, '0.4.0')>=0:
+                torch.set_grad_enabled(True)
             all_masked_outputs.append((dic_output_kinds[output_kind](x)*mask).unsqueeze(2))
         x = torch.cat(all_masked_outputs, 2)
-        x = torch.sum(x, 2).squeeze(2)
-        return x, logits, averages
+        x = torch.sum(x, 2)
+        if len(x.size())>2:
+            x = x.squeeze(2)
+        return x, {'logits':logits, 'averages':averages}
       
       
 class ModelFCPart(nn.Module):
@@ -367,29 +484,137 @@ class ModelFCPart(nn.Module):
         
         if configs['use_extra_inputs'] and configs['layer_to_insert_extra_inputs']>(configs['n_hidden_layers']+1):
             raise_with_traceback(ValueError("configs['layer_to_insert_extra_inputs'] ("+configs['layer_to_insert_extra_inputs']+") is set to bigger than configs['n_hidden_layers']+1 ("+configs['n_hidden_layers']+1 +")"))
-        if configs['dropout_batch_normalization_last_layer']:
-            if configs['use_batchnormalization_hidden_layers']:
-                current_model.add_module("bn_out",torch.nn.BatchNorm1d(self.current_n_channels).cuda())
-            current_model.add_module("drop_out",nn.Dropout(p=configs['use_dropout_hidden_layers']).cuda())
                                  
         self.fc_after_extra_inputs.apply(weights_init)
         self.fc_before_extra_inputs.apply(weights_init)
       
     def forward(self, input, extra_fc_input = None):
-      
         x = self.fc_before_extra_inputs(input)
         if extra_fc_input is not None:
             x = torch.cat((extra_fc_input,x),1)
         x = self.fc_after_extra_inputs(x)
-        return x
+        return x, {'ws':None,'vs':None}
 
+class SoftmaxWithIdentityGradient(torch.autograd.Function):
+    def __init__(self):
+        super(SoftmaxWithIdentityGradient, self).__init__()
+    
+    def forward(self, input):
+        #return nn.functional.softmax(torch.autograd.Variable(input), dim = 1).data
+        if utils.compare_versions(torch.__version__, '0.4.0')>=0:
+            nonlinearity = nn.Softmax(dim = 1)
+        else:
+            nonlinearity = nn.Softmax()
+        return nonlinearity(torch.autograd.Variable(input)).data
+    
+    def backward(self, grad_output):
+        grad_input = grad_output.clone()/grad_output.size(1)
+        return grad_input
+
+def swig(input):
+    return SoftmaxWithIdentityGradient()(input)
+  
+class ModelInternalClassSelection(nn.Module):
+    def __init__(self, current_n_channels):
+        super(ModelInternalClassSelection, self).__init__()
+        self.current_n_channels = current_n_channels
+        activation_function_dict = {'relu': nn.ReLU().cuda(), 'tanh':nn.Tanh().cuda(), 
+                            'sigmoid':nn.Sigmoid().cuda(), 'softplus':nn.Softplus().cuda()
+        }
+    
+        activation_function = activation_function_dict[configs['fc_activation']]
+        
+        self.fc_1 = torch.nn.Sequential()
+            
+        if configs['use_batchnormalization_hidden_layers']:
+            self.fc_1.add_module("bn_fc_1",torch.nn.BatchNorm1d(self.current_n_channels).cuda())
+        self.fc_1.add_module("drop_fc_1",nn.Dropout(p=configs['use_dropout_hidden_layers']).cuda())
+        # On DGX, this next line, in the first iteration of the loop, is the one taking a long time (about 250s) in the .cuda() part.
+        # probably because of some incompatibility between Cuda 9.0 and pytorch 0.1.12
+        self.fc_1.add_module("linear_fc_1",nn.Linear(self.current_n_channels, configs['channels_hidden_layers'] ).cuda()) 
+        self.fc_1.add_module("nonlinearity_fc_1",activation_function)
+        self.current_n_channels = configs['channels_hidden_layers']
+        
+        self.fc_11 = torch.nn.Sequential()
+        
+        if configs['use_batchnormalization_hidden_layers']:
+            self.fc_11.add_module("bn_fc11",torch.nn.BatchNorm1d(self.current_n_channels).cuda())
+        self.fc_11.add_module("drop_fc11",nn.Dropout(p=configs['use_dropout_hidden_layers']).cuda())
+        # On DGX, this next line, in the first iteration of the loop, is the one taking a long time (about 250s) in the .cuda() part.
+        # probably because of some incompatibility between Cuda 9.0 and pytorch 0.1.12
+        self.fc_11.add_module("linear_fc11",nn.Linear(self.current_n_channels, 512 ).cuda())
+        self.fc_11.add_module("nonlinearity_fc_11",activation_function)
+        self.fc_11.add_module("linear_fc11_2",nn.Linear(512, configs['classes_hidden_layers'] ).cuda()) 
+        #self.fc_11.add_module("nonlinearity_fc11",nn.Softplus())
+        if utils.compare_versions(torch.__version__, '0.4.0')>=0:
+            self.fc_11.add_module("nonlinearity_fc11",nn.Softmax(dim = 1))
+        else:
+            self.fc_11.add_module("nonlinearity_fc11",nn.Softmax())
+        #self.fc_11.add_module("nonlinearity_fc11",nn.Sigmoid())
+        
+        fcs = []
+        for i in range(configs['classes_hidden_layers']):
+            fc_to_add = torch.nn.Sequential()
+            
+            if configs['use_batchnormalization_hidden_layers']:
+                fc_to_add.add_module("bn_fc_12"+str(i),torch.nn.BatchNorm1d(self.current_n_channels).cuda())
+            #fc_to_add.add_module("drop_fc_12"+str(i),nn.Dropout(p=configs['use_dropout_hidden_layers']).cuda())
+            fc_to_add.add_module("linear_fc_12"+str(i),nn.Linear(self.current_n_channels, 512 ).cuda()) 
+            fc_to_add.add_module("nonlinearity_fc_12"+str(i),activation_function)
+            fc_to_add.add_module("linear_fc_12_2"+str(i),nn.Linear(512, 512 ).cuda()) 
+            fcs.append(fc_to_add)
+        
+        self.fc_12 = nn.ModuleList(fcs)
+        
+        self.fc_1.apply(weights_init)
+        self.fc_12.apply(weights_init)
+        self.fc_11.apply(weights_init)
+        
+        if configs['use_extra_inputs']:
+                self.current_n_channels = self.current_n_channels+15
+        
+        #TODO: do random fixed dropout of each input feature of the non-softmax branch
+        #torch.randint_like()
+        
+        #TODO: orthogonal loss
+        
+        
+    def forward(self, input, extra_fc_input = None, epoch=0):
+        
+        x1 = self.fc_1(input)
+        
+        '''
+        if epoch < 10:
+            ws = self.fc_11(x.detach())
+        else:
+            ws = self.fc_11(x)
+        '''
+        
+        ws = self.fc_11(x1)
+        #ws = swig(ws)
+        print(torch.max(ws, dim = 1)[1])
+        vs = []
+        for i in range(configs['classes_hidden_layers']):
+            v = self.fc_12[i](x1)
+            vs.append(v)
+            v = ws[:,i].unsqueeze(1).expand(x1.size(0), v.size(1))*v
+            if i ==0:
+                x = v
+            else:
+                x = x + v
+        vs = torch.stack(vs,dim = 2)
+        if extra_fc_input is not None:
+            x = torch.cat((extra_fc_input,x),1)
+        return x, {'ws':ws,'vs':vs}
+      
 class NonDataParallel(nn.Module):
     def __init__(self, model):
         super(NonDataParallel, self).__init__()
         self.module = model
     
-    def forward(self, input, extra_inputs):
-        return self.module(input, extra_inputs)
+    def forward(self, input, extra_inputs, epoch):
+        
+        return self.module(input, extra_inputs, epoch)
 
 def get_model(num_ftrs):
     outmodel = ModelMoreInputs(num_ftrs)
@@ -552,7 +777,7 @@ class CheXNet(nn.Module):
         return x   
 '''
 
-def get_unsupervised_weights(inputs, nClusters, filename):
+def get_unsupervised_weights(inputs, nClusters, filename, pca):
     save_and_load_wb = False
     if save_and_load_wb:
         if os.path.isfile('w'+filename):
@@ -567,10 +792,10 @@ def get_unsupervised_weights(inputs, nClusters, filename):
             return w, b
     
     totalWeights = (nClusters * (nClusters - 1))
-    N_CHANNELS = inputs.shape[1]
+    N_CHANNELS = inputs.shape[1] #50176
     kmeans = KMeans(n_clusters=nClusters, init='k-means++').fit(inputs)
     print(Counter(kmeans.labels_))
-    cc = kmeans.cluster_centers_
+    cc = np.matmul(kmeans.cluster_centers_,pca.components_)+pca.mean_
     clusterCenter = np.transpose(cc)
 
     # intialize the weight matrix and bias matrix     
@@ -607,7 +832,7 @@ def get_unsupervised_weights(inputs, nClusters, filename):
         h5f.create_dataset('dataset_1', data=b)
         h5f.close()
         
-    return w, b
+    return w, b, kmeans
 
 def init_k_means(tensor, w, b):
     if hasattr(tensor, 'weight') or hasattr(tensor, 'bias'):

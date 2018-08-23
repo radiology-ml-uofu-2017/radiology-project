@@ -80,6 +80,8 @@ configs = ConfigsClass()
 #configs from this block should probably be the same regardless of model and machine
 configs.add_variable('training_pipeline', 'simple') #one_vs_all, ensemble, simple
 configs.add_variable('use_set_29', False)
+configs.add_variable('data_to_use', ['2017'])
+configs.add_variable('use_images_with_position_LARGE', False)
 configs.add_variable('pre_transformation', 'none') # 'boxcox', 'log', 'none', 'residual'
 configs.add_variable('individual_pre_transformation', {'copd':'none'})
 configs.add_variable('CKPT_PATH', 'densenet121.pth.tar')
@@ -89,13 +91,16 @@ configs.add_variable('output_model_name', 'model' + timestamp )
 configs.add_variable('save_model', False)
 configs.add_variable('N_EPOCHS', 50)
 configs.add_variable('use_lr_scheduler', True)
-configs.add_variable('kind_of_loss', 'l2') #'l1' or 'l2', 'smoothl1', or 'bce'
+configs.add_variable('kind_of_loss', 'l2') #'l1' or 'l2', 'smoothl1', or 'bce' or 'relative_mse'
+configs.add_variable('exponent_relative_error_mse_loss', 1)
 configs.add_variable('individual_kind_of_loss', {'copd':'bce'})
 configs.add_variable('individual_loss_weights', {'copd':0.33})
 configs.add_variable('loss_weight', 1.0)
 configs.add_variable('positions_to_use', ['PA']) # set of 'PA', 'AP' in a list 
 configs.add_variable('initial_lr_fc', 0.00001)
 configs.add_variable('initial_lr_cnn', 0.00001)
+configs.add_variable('initial_lr_location', 0.0001)
+configs.add_variable('first_epoch_scheduler_step', 10)
 configs.add_variable('load_image_features_from_file', True)
 configs.add_variable('use_fixed_test_set', True)
 configs.add_variable('weight_initialization', 'original') # 'xavier', 'original'
@@ -121,16 +126,23 @@ configs.add_variable('meanvarloss_discretization_spacing',0.01)
 configs.add_variable('dsnm_n_groups',50)
 configs.add_variable('use_pca_dsnm',True)
 configs.add_variable('dsnm_pca_size',100)
-configs.add_variable('use_dsnm',False)
+configs.add_variable('fully_connected_kind','fully_connected') #'fully_connected', 'dsnm', 'softmax_gate'
 configs.add_variable('use_more_one_gpu',False)
-
+configs.add_variable('classes_hidden_layers',15)
+configs.add_variable('gate_uniformity_loss_multiplier',0.4)
+configs.add_variable('mutual_exclusivity_loss_multiplier',0.4)
+configs.add_variable('gate_orthogonal_loss_multiplier',1.0)
+configs.add_variable('use_spatial_transformer_network',False)
+configs.add_variable('use_batchnormalization_location',True)
+configs.add_variable('use_dropout_location',0.0)
+configs.add_variable('channels_location',32)
 
 #These are the main configs to change from default
 configs.add_variable('trainable_densenet', False)
 configs.add_variable('use_conv11', False)
 configs.add_variable('labels_to_use', 'only_absolute') # 'two_ratios', 'three_absolute', 'all_nine',
                                                        #'only_absolute','none', 'fev1fvc_predrug_absolute', 
-                                                       #'predict_diffs',
+                                                       #'predict_diffs', 'fev1_ratio', 'fvcfev1_predrug'
 configs.add_variable('use_lateral', False)
 configs.add_variable('tie_cnns_same_weights', False)
 configs.add_variable('tie_conv11_same_weights', False)
@@ -149,6 +161,7 @@ configs.add_variable('machine_to_use', 'dgx' if socket.gethostname() == 'rigveda
 configs.add_variable('remove_pre_avg_pool', True)
 configs.add_variable('l2_reg_fc', 0.05)
 configs.add_variable('l2_reg_cnn', 0.0)
+configs.add_variable('l2_reg_location', 0.0)
 
 configs.add_variable('use_sigmoid_safety_constants',False)
 configs.add_variable('sigmoid_safety_constant', 
@@ -185,7 +198,8 @@ configs.add_variable('columns_translations',
                         'AGE_AT_PFT':'age',
                         'GENDER':'gender',
                         'TOBACCO_STATUS':'tobacco_status',
-                        'SMOKING_TOBACCO_STATUS':'smoking_tobacco_status'})
+                        'SMOKING_TOBACCO_STATUS':'smoking_tobacco_status',
+                        'LUNG_TRANSPLANT':'lung_transplant'})
                      
 configs.add_variable('all_input_columns',lambda self: list(self['columns_translations'].values()))
 configs.add_variable('all_output_columns',['fvc_pred',
@@ -221,6 +235,8 @@ configs.add_self_referenced_variable_from_dict('get_labels_columns_pft', 'labels
                                        'fev1fvc_predrug_absolute':['fev1_predrug','fvc_predrug'], 
                                        'predict_diffs':['fev1_diff','fvc_diff'], 
                                        'two_predrug_absolute':['fev1_predrug','fvc_predrug'], 
+                                       'fev1fvc_predrug':['fev1fvc_predrug'],
+                                       'fev1_ratio':['fev1_ratio'],
                                        'none':[]}) 
                                       
 configs.add_self_referenced_variable_from_dict('get_labels_columns_copd', 'output_copd',
@@ -236,6 +252,8 @@ configs.add_self_referenced_variable_from_dict('pft_plot_columns', 'labels_to_us
                                        'fev1fvc_predrug_absolute':[['fev1_predrug','fvc_predrug'], ['fev1fvc_predrug']], 
                                        'predict_diffs':[['fev1_diff','fvc_diff'], ['fev1fvc_predrug'], ['fev1_ratio']], 
                                        'two_predrug_absolute':[['fev1_predrug','fvc_predrug'], ['fev1fvc_predrug'], ['fev1_ratio']],
+                                       'fev1fvc_predrug':[['fev1fvc_predrug']],
+                                       'fev1_ratio':[['fev1_ratio']],
                                        'none':[]})
                                       
 configs.add_variable('pre_transform_labels', PreTransformLabels(configs))
@@ -277,7 +295,7 @@ configs.add_predefined_set_of_configs('resnet18', {'chexnet_architecture': 'resn
 
 configs.add_predefined_set_of_configs('cnn20180628', {'use_true_predicted': True
                                                 ,'use_lateral': True
-                                                ,'kind_of_loss':'relative_mse'
+                                                ,'kind_of_loss':'l1'
                                                 ,'network_output_kind':'softplus'
                                                 ,'labels_to_use':'two_ratios'
                                                 , 'trainable_densenet': True
