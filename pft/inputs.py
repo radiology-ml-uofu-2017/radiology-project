@@ -178,12 +178,12 @@ class DatasetGenerator(Dataset):
 def get_labels():
     #selects sets of data to use
     if configs['use_set_29']:
-        files_with_labels = ['./labels.csv']
+        all_labels = pd.read_csv('./labels.csv')
+        all_labels['dataset'] = '2017'
     else:
         file_root = '/usr/sci/projects/DeepLearning/Tolga_Lab/Projects/Project_JoyceSchroeder/data/data_PFT/MetaData/MetaData_'
         file_end = {'2012-2016':'2012-2016/Chest_Xray_2012-2016_TJ_clean_ResearchID_PFTValuesAndInfo_No_PHI.csv', '2017':'2017/Chest_Xray_20180316_Clem_clean_ResearchID_PFTValuesAndInfo_noPHI.csv'}
-        files_with_labels = [ file_root + file_end[dataset] for dataset in configs['data_to_use']]
-    all_labels = pd.concat([pd.read_csv(file_with_labels) for file_with_labels in files_with_labels])
+        all_labels = pd.concat([pd.read_csv(file_root + file_end[dataset]).assign(dataset=dataset) for dataset in configs['data_to_use']])
     all_labels['fev1_diff'] = all_labels['Predicted FEV1'] - all_labels['Pre-Drug FEV1']
     all_labels['fvc_diff'] = all_labels['Predicted FVC'] - all_labels['Pre-Drug FVC']
     

@@ -64,10 +64,13 @@ configs.load_predefined_set_of_configs('resnet18')
 #configs['fully_connected_kind'] = 'dsnm'
 
 #configs['load_image_features_from_file'] = False
-#configs['data_to_use']  = ['2012-2016', '2017']
+configs['data_to_use']  = ['2012-2016', '2017']
 #configs['BATCH_SIZE']=20
 #configs['densenet_dropout'] = 0.0
 #configs['use_dropout_hidden_layers'] = 0.0
+configs['data_to_use']  = 'imagenet'
+configs['maximum_date_diff']  = 2
+maximum_date_diff
 
 #configs['chexnet_architecture'] =  'resnet'
 #configs['chexnet_layers'] = 50
@@ -365,7 +368,13 @@ def load_training_pipeline(cases_to_use, all_images, all_labels, trainTransformS
         train_loader=get_loader(all_images, train_images, all_labels, trainTransformSequence, train = True)
         if i == 0:
             eval_train_loader=get_loader(all_images, train_images, all_labels, testTransformSequence, train = False, verbose = False)
-        test_loader=get_loader(all_images, test_images, all_labels, testTransformSequence, train= False)
+        
+        test_labels = all_labels
+        
+        if configs['use_only_2017_for_test']:
+            test_labels = test_labels[(test_labels['dataset'] =='2017')]
+            
+        test_loader=get_loader(all_images, test_images, test_labels, testTransformSequence, train= False)
 
         logging.info('finished loaders and generators. starting models')
         
@@ -523,7 +532,12 @@ def merge_images_and_labels(all_images, all_labels):
         else:
             all_images_merged = pd.merge(all_images_merged, image_set, on=['subjectid', 'crstudy'])[['subjectid', 'crstudy']]
     joined_tables = pd.merge(all_images_merged, all_labels, on=['subjectid', 'crstudy'])
-
+    
+    if configs['remove_lung_transplants']:
+        joined_tables = joined_tables[(joined_tables['lung_transplant'] ==0)]
+        
+    joined_tables = joined_tables[(joined_tables['Date_Diff'] < configs['maximum_date_diff'])]
+    
     #TODO: severity test
     #joined_tables = joined_tables[(joined_tables['fev1fvc_predrug'] > 0.7) | ((joined_tables['fev1_ratio'] < 0.5) & (joined_tables['fev1fvc_predrug'] < 0.7))]
     #TODO: lung transplant test

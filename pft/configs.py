@@ -136,6 +136,10 @@ configs.add_variable('use_spatial_transformer_network',False)
 configs.add_variable('use_batchnormalization_location',True)
 configs.add_variable('use_dropout_location',0.0)
 configs.add_variable('channels_location',32)
+configs.add_variable('pretrain_kind', 'chestxray')
+configs.add_variable('maximum_date_diff', 180)
+configs.add_variable('use_only_2017_for_test', True)
+configs.add_variable('remove_lung_transplants', False)
 
 #These are the main configs to change from default
 configs.add_variable('trainable_densenet', False)

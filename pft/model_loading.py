@@ -50,7 +50,8 @@ def load_checkpoint(model):
 def load_pretrained_chexnet():
     chexnetModel = CheXNet(14, configs['chexnet_layers'], configs['chexnet_architecture']).cuda()
     chexnetModel = torch.nn.DataParallel(chexnetModel).cuda()
-    chexnetModel = load_checkpoint(chexnetModel)
+    if configs['pretrain_kind']=='chestxray':
+        chexnetModel = load_checkpoint(chexnetModel)
     return chexnetModel
 
 class Flatten(nn.Module):
@@ -641,7 +642,10 @@ class CheXNet(nn.Module):
     def __init__(self, out_size, num_layers = 121, architecture = 'densenet'):
         super(CheXNet, self).__init__()
         self.architecture = architecture
-        model_parameters = {'pretrained':False}
+        if configs['pretrain_kind'] == 'imagenet':
+            model_parameters = {'pretrained':True}
+        else:
+            model_parameters = {'pretrained':False}
         if architecture=='densenet':
             model_parameters['drop_rate'] = configs['densenet_dropout']
             num_layers_to_model = {121:torchvision.models.densenet121, 169:torchvision.models.densenet169, 201:torchvision.models.densenet201, 161:torchvision.models.densenet161}
