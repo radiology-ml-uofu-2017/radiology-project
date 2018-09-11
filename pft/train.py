@@ -310,7 +310,7 @@ def select_columns_one_table_after_merge(df, suffix, keep_columns=[]):
     to_return.columns = [(x[:-(len(suffix))] if (x not in keep_columns) else x) for x in to_return ]
     return to_return
 
-def get_loader(set_of_images, cases_to_use, all_labels, transformSequence, train, verbose = True):
+def get_loader(set_of_images, cases_to_use, all_labels, transformSequence, split, verbose = True):
     cases_to_use_on_set_of_images = []
     for i in range(len(set_of_images)):
         current_df = set_of_images[i].copy(deep=True)
@@ -323,12 +323,21 @@ def get_loader(set_of_images, cases_to_use, all_labels, transformSequence, train
         cases_to_use_on_set_of_images.append(pd.merge(select_columns_one_table_after_merge(all_joined_table, '_'+str(i), ['subjectid', 'crstudy']),all_labels, on=['subjectid', 'crstudy']))
         
         if verbose:
-            logging.info('size ' + ('train' if train else 'test') + ' ' + str(i) +': '+str(np.array(cases_to_use_on_set_of_images[i]).shape[0]))
+            logging.info('size ' + split + ' ' + str(i) +': '+str(np.array(cases_to_use_on_set_of_images[i]).shape[0]))
     t_dataset = inputs.DatasetGenerator(cases_to_use_on_set_of_images, transformSequence)
-    if train:
-      t_indices = torch.randperm(len(t_dataset))
+    if split == 'train':
+      if configs['balance_dataset_by_fvcfev1_predrug']:
+          column_to_use = cases_to_use_on_set_of_images[0]['fev1fvc_predrug']
+          column_cut = pd.cut(column_to_use, bins=[0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0])
+          weights = (1/8./(column_to_use.groupby(column_cut).transform('count')/column_to_use.count()))
+
+          sampler = torch.utils.data.sampler.WeightedRandomSampler(weights, len(weights), replacement=True)
+      else:
+          t_indices = torch.randperm(len(t_dataset))
+          sampler=SubsetRandomSampler(t_indices)
+      
       t_loader = DataLoader(dataset=t_dataset, batch_size=configs['BATCH_SIZE'],
-                          sampler=SubsetRandomSampler(t_indices), num_workers=NUM_WORKERS, pin_memory=True, drop_last = True)
+                          sampler = sampler, num_workers=NUM_WORKERS, pin_memory=True, drop_last = True)
     else:
         t_loader = DataLoader(dataset=t_dataset, batch_size=configs['BATCH_SIZE'],
                                 shuffle=False, num_workers=NUM_WORKERS, pin_memory=True)
@@ -375,16 +384,16 @@ def load_training_pipeline(cases_to_use, all_images, all_labels, trainTransformS
         logging.info('total images training: '+str(np.array(train_images).shape[0]))
         logging.info('total images test: '+str(np.array(test_images).shape[0]))
         
-        train_loader=get_loader(all_images, train_images, all_labels, trainTransformSequence, train = True)
+        train_loader=get_loader(all_images, train_images, all_labels, trainTransformSequence, split = 'train')
         if i == 0:
-            eval_train_loader=get_loader(all_images, train_images, all_labels, testTransformSequence, train = False, verbose = False)
+            eval_train_loader=get_loader(all_images, train_images, all_labels, testTransformSequence, split = 'eval_train', verbose = False)
         
         test_labels = all_labels
         
         if configs['use_only_2017_for_test']:
             test_labels = test_labels[(test_labels['dataset'] =='2017')]
             
-        test_loader=get_loader(all_images, test_images, test_labels, testTransformSequence, train= False)
+        test_loader=get_loader(all_images, test_images, test_labels, testTransformSequence, 'validation')
 
         logging.info('finished loaders and generators. starting models')
         
@@ -402,24 +411,26 @@ def load_training_pipeline(cases_to_use, all_images, all_labels, trainTransformS
           'bce':nn.BCELoss(size_average = True).cuda(),
           'relative_mse':relative_error_mse_loss}
         criterion = [{'loss':losses_dict[configs['get_individual_kind_of_loss'][k]], 'weight':configs['get_individual_loss_weights'][k]} for k in configs['get_labels_columns']]
-        
-        optimizer = optim.Adam( [
-          {'params':model.module.stn.parameters(), 'lr':configs['initial_lr_location'], 'weight_decay':configs['l2_reg_location']},
-          {'params':model.module.final_layers.parameters(), 'lr':configs['initial_lr_fc'], 'weight_decay':configs['l2_reg_fc']}, 
-          {'params':model.module.cnn.parameters(), 'lr':configs['initial_lr_cnn'], 'weight_decay':configs['l2_reg_cnn']}
-          ], lr=configs['initial_lr_fc'] , weight_decay=configs['l2_reg_fc'])
-        
-        '''
-        optimizer = optim.SGD( [
-          {'params':model.module.stn.parameters(), 'lr':configs['initial_lr_location'], 'weight_decay':configs['l2_reg_location']},
-          {'params':model.module.final_layers.parameters(), 'lr':configs['initial_lr_fc'], 'weight_decay':configs['l2_reg_fc']}, 
-          {'params':model.module.cnn.parameters(), 'lr':configs['initial_lr_cnn'], 'weight_decay':configs['l2_reg_cnn']}
-          ], lr=configs['initial_lr_fc'] , momentum = 0.9, nesterov = True, weight_decay=configs['l2_reg_fc'])
+        if configs['optimizer']=='adam':
+            optimizer = optim.Adam( [
+              {'params':model.module.stn.parameters(), 'lr':configs['initial_lr_location'], 'weight_decay':configs['l2_reg_location']},
+              {'params':model.module.final_layers.parameters(), 'lr':configs['initial_lr_fc'], 'weight_decay':configs['l2_reg_fc']}, 
+              {'params':model.module.cnn.parameters(), 'lr':configs['initial_lr_cnn'], 'weight_decay':configs['l2_reg_cnn']}
+              ], lr=configs['initial_lr_fc'] , weight_decay=configs['l2_reg_fc'])
+        elif configs['optimizer']=='nesterov':
+            optimizer = optim.SGD( [
+              {'params':model.module.stn.parameters(), 'lr':configs['initial_lr_location'], 'weight_decay':configs['l2_reg_location']},
+              {'params':model.module.final_layers.parameters(), 'lr':configs['initial_lr_fc'], 'weight_decay':configs['l2_reg_fc']}, 
+              {'params':model.module.cnn.parameters(), 'lr':configs['initial_lr_cnn'], 'weight_decay':configs['l2_reg_cnn']}
+              ], lr=configs['initial_lr_fc'] , momentum = 0.9, nesterov = True, weight_decay=configs['l2_reg_fc'])
         '''
         if utils.compare_versions(torch.__version__, '0.4.0')>=0:
             scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor = 0.1, patience = 5, mode = 'min', verbose = True)
         else:
             scheduler = utils.ReduceLROnPlateau(optimizer, factor = 0.1, patience = 5, mode = 'min', verbose = True)
+        '''
+        scheduler = utils.ReduceLROnPlateau(optimizer, factor = 0.1, patience = 5, mode = 'min', verbose = True)
+         
         models = models + [model]
         criterions = criterions + [criterion]
         optimizers = optimizers + [optimizer]

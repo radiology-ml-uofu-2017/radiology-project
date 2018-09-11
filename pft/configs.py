@@ -140,6 +140,8 @@ configs.add_variable('pretrain_kind', 'chestxray')
 configs.add_variable('maximum_date_diff', 180)
 configs.add_variable('use_only_2017_for_test', True)
 configs.add_variable('remove_lung_transplants', False)
+configs.add_variable('balance_dataset_by_fvcfev1_predrug', False)
+configs.add_variable('optimizer', 'adam')
 
 #These are the main configs to change from default
 configs.add_variable('trainable_densenet', False)
