@@ -70,7 +70,7 @@ configs['data_to_use']  = ['2012-2016', '2017']
 #configs['use_dropout_hidden_layers'] = 0.0
 configs['data_to_use']  = 'imagenet'
 configs['maximum_date_diff']  = 2
-maximum_date_diff
+configs['remove_lung_transplants']  = True
 
 #configs['chexnet_architecture'] =  'resnet'
 #configs['chexnet_layers'] = 50
