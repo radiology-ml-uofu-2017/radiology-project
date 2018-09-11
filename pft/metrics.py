@@ -159,6 +159,10 @@ def report_final_results(y_corr , y_pred, y_corr_all, train):
     correlations = {}
     output_variables = list(set(sum(configs['pft_plot_columns'],[])))
     accuracies = {}
+    
+    if ('fev1_ratio' in configs['get_labels_columns'] or 'fev1_predrug' in configs['get_labels_columns']) and ('fev1fvc_predrug' in configs['get_labels_columns'] or ('fev1_predrug' in configs['get_labels_columns'] and 'fvc_predrug' in configs['get_labels_columns'])):
+        accuracies['confusion_gold'] = sklearn.metrics.confusion_matrix(get_gold(absolutes_and_important_ratios_plot_calc(y_corr, y_corr_all, 'fev1_ratio'), absolutes_and_important_ratios_plot_calc(y_corr, y_corr_all, 'fev1fvc_predrug')), get_gold(absolutes_and_important_ratios_plot_calc(y_pred, y_corr_all, 'fev1_ratio'), absolutes_and_important_ratios_plot_calc(y_pred, y_corr_all, 'fev1fvc_predrug')))
+    
     for k in range(len(output_variables)):
         name = output_variables[k]
         this_y_corr = absolutes_and_important_ratios_plot_calc(y_corr, y_corr_all, name)

@@ -68,9 +68,19 @@ configs['data_to_use']  = ['2012-2016', '2017']
 #configs['BATCH_SIZE']=20
 #configs['densenet_dropout'] = 0.0
 #configs['use_dropout_hidden_layers'] = 0.0
-configs['data_to_use']  = 'imagenet'
+configs['pretrain_kind']  = 'imagenet'
 configs['maximum_date_diff']  = 2
 configs['remove_lung_transplants']  = True
+
+configs['n_hidden_layers'] = 2
+configs['channels_hidden_layers'] = 256 # only used if configs['n_hidden_layers']>0
+configs['use_dropout_hidden_layers'] = 0.25 # 0 turn off dropout; 0.25 gives seems to give about the same results as l = 0.05 # only used if configs['n_hidden_layers']>0
+configs['use_batchnormalization_hidden_layers'] = True
+configs['remove_pre_avg_pool'] = False
+configs['l2_reg_fc'] = 0.0
+configs['l2_reg_cnn'] = 0.0
+#configs['initial_lr_fc'] = 0.001
+#configs['initial_lr_cnn'] = 0.001
 
 #configs['chexnet_architecture'] =  'resnet'
 #configs['chexnet_layers'] = 50
@@ -392,12 +402,20 @@ def load_training_pipeline(cases_to_use, all_images, all_labels, trainTransformS
           'bce':nn.BCELoss(size_average = True).cuda(),
           'relative_mse':relative_error_mse_loss}
         criterion = [{'loss':losses_dict[configs['get_individual_kind_of_loss'][k]], 'weight':configs['get_individual_loss_weights'][k]} for k in configs['get_labels_columns']]
-
+        
         optimizer = optim.Adam( [
           {'params':model.module.stn.parameters(), 'lr':configs['initial_lr_location'], 'weight_decay':configs['l2_reg_location']},
           {'params':model.module.final_layers.parameters(), 'lr':configs['initial_lr_fc'], 'weight_decay':configs['l2_reg_fc']}, 
           {'params':model.module.cnn.parameters(), 'lr':configs['initial_lr_cnn'], 'weight_decay':configs['l2_reg_cnn']}
           ], lr=configs['initial_lr_fc'] , weight_decay=configs['l2_reg_fc'])
+        
+        '''
+        optimizer = optim.SGD( [
+          {'params':model.module.stn.parameters(), 'lr':configs['initial_lr_location'], 'weight_decay':configs['l2_reg_location']},
+          {'params':model.module.final_layers.parameters(), 'lr':configs['initial_lr_fc'], 'weight_decay':configs['l2_reg_fc']}, 
+          {'params':model.module.cnn.parameters(), 'lr':configs['initial_lr_cnn'], 'weight_decay':configs['l2_reg_cnn']}
+          ], lr=configs['initial_lr_fc'] , momentum = 0.9, nesterov = True, weight_decay=configs['l2_reg_fc'])
+        '''
         if utils.compare_versions(torch.__version__, '0.4.0')>=0:
             scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor = 0.1, patience = 5, mode = 'min', verbose = True)
         else:

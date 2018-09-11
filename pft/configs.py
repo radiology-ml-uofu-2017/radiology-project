@@ -51,7 +51,7 @@ class ConfigsClass(object):
 
     def log_configs(self):
         logging.info('-------------------------------used configs-------------------------------')
-        for key, value in iteritems(self.configs):
+        for key, value in sorted(iteritems(self.configs)):
             logging.info(key + ': ' + str(self.get_variable(key)).replace('\n', ' ').replace('\r', ''))
         logging.info('-----------------------------end used configs-----------------------------')
         
