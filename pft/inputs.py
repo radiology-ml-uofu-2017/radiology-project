@@ -9,6 +9,7 @@ import h5py
 import torchvision.transforms as transforms
 import image_preprocessing
 import numpy as np
+import metrics
 from PIL import Image
 import model_loading
 
@@ -144,6 +145,14 @@ class DatasetGenerator(Dataset):
                     
             if self.transform is not None: 
                 imageData[i] = self.transform(imageData[i])
+                
+                '''
+                if i == 0:
+                    imageData[i] = image_preprocessing.CropOneSideNumpy(None)(imageData[i])
+                else:
+                    imageData[i] = image_preprocessing.CropSideCenterNumpy(None)(imageData[i])
+                '''
+                
             imageData[i] = np.expand_dims(imageData[i], 0)
             filepath.append(self.listImage[i]['filepath'].iloc[index])
         imageData = np.concatenate(imageData,0)
@@ -186,7 +195,10 @@ def get_labels():
         all_labels = pd.concat([pd.read_csv(file_root + file_end[dataset]).assign(dataset=dataset) for dataset in configs['data_to_use']])
     all_labels['fev1_diff'] = all_labels['Predicted FEV1'] - all_labels['Pre-Drug FEV1']
     all_labels['fvc_diff'] = all_labels['Predicted FVC'] - all_labels['Pre-Drug FVC']
+
     
+    
+
     if not configs['use_set_29']:
         all_labels.rename(index=str, columns=configs['columns_translations'], inplace = True)
     
@@ -218,10 +230,16 @@ def get_labels():
     all_labels = pd.concat([all_labels,pd.get_dummies(all_labels['smoking_tobacco_status'], prefix='smoking_tobacco_status').astype('float')],axis=1)
 
     all_labels[percentage_labels] = all_labels[percentage_labels] /100.
+    
     if configs['use_copd_definition_as_label']:
         all_labels['copd'] = (all_labels['fev1fvc_predrug']< 0.7)*1
-    configs['pre_transform_labels'].set_pre_transformation_labels(all_labels)
-    all_labels = configs['pre_transform_labels'].apply_transform(all_labels)
+    
+    all_labels['gold'] = metrics.get_gold(all_labels['fev1_ratio'], all_labels['fev1fvc_predrug'])
+    
+    if not configs['create_csv_from_dataset']:
+        configs['pre_transform_labels'].set_pre_transformation_labels(all_labels)
+        all_labels = configs['pre_transform_labels'].apply_transform(all_labels)
+    
     return all_labels
 
 def count_unique_images_and_pairs(images_to_use, all_examples):
@@ -308,9 +326,13 @@ def get_images():
     all_images, num_ftrs, list_pretransforms = get_all_images()
     
     sets_of_images = []
-    sets_of_images.append(all_images[all_images['position'].isin(configs['positions_to_use'])])
+    if not configs['create_csv_from_dataset']:
+        sets_of_images.append(all_images[all_images['position'].isin(configs['positions_to_use'])])
     
     if configs['use_lateral']:
+        if configs['create_csv_from_dataset']:
+            sets_of_images.append(all_images[all_images['position'].isin(['PA'])])
+            sets_of_images.append(all_images[all_images['position'].isin(['AP'])])
         sets_of_images.append(all_images[all_images['position'].isin(['LAT'])])
     list_transforms = []
     if configs['trainable_densenet'] and (not configs['load_image_features_from_file']):

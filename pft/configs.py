@@ -107,6 +107,7 @@ configs.add_variable('weight_initialization', 'original') # 'xavier', 'original'
 configs.add_variable('bias_initialization', 'original') #'constant', 'original'
 configs.add_variable('total_ensemble_models', 6) # only used if configs['training_pipeline']=='ensemble'
 configs.add_variable('output_copd', False)
+configs.add_variable('output_gold', False)
 configs.add_variable('percentage_labels', ['fev1fvc_pred','fev1fvc_predrug','fvc_ratio','fev1_ratio','fev1fvc_ratio'])
 configs.add_variable('use_true_predicted', False)
 configs.add_variable('use_copd_definition_as_label', False)
@@ -138,10 +139,28 @@ configs.add_variable('use_dropout_location',0.0)
 configs.add_variable('channels_location',32)
 configs.add_variable('pretrain_kind', 'chestxray')
 configs.add_variable('maximum_date_diff', 180)
-configs.add_variable('use_only_2017_for_test', True)
+configs.add_variable('use_only_2017_for_test', False)
 configs.add_variable('remove_lung_transplants', False)
 configs.add_variable('balance_dataset_by_fvcfev1_predrug', False)
 configs.add_variable('optimizer', 'adam')
+configs.add_variable('splits_to_use', 'test_with_val') #'test_with_val', 'test_with_test', 'include_val_in_training' , 'include_test_in_training'
+configs.add_variable('use_lung_transplant_in_test', False)
+configs.add_variable('max_date_diff_to_use_for_test', 2)
+configs.add_variable('remove_repeated_pfts', False)
+configs.add_variable('remove_repeated_images', False)
+configs.add_variable('create_csv_from_dataset', False)
+configs.add_variable('remove_cases_more_one_image_per_position', False)
+configs.add_variable('load_model', False)
+configs.add_variable('model_to_load', '')
+configs.add_variable('prefix_model_to_load', '')
+configs.add_variable('skip_train', False)
+configs.add_variable('use_sigmoid_channel', False)
+configs.add_variable('n_channels_local_convolution', 512)
+configs.add_variable('use_local_conv', False)
+configs.add_variable('milestones_steps', [35,45])
+configs.add_variable('scheduler_to_use', 'plateau')
+configs.add_variable('first_parameter_cnn_not_to_freeze', 'conv1')
+configs.add_variable('override_max_axis_graph', None)
 
 #These are the main configs to change from default
 configs.add_variable('trainable_densenet', False)
@@ -219,7 +238,8 @@ configs.add_variable('all_output_columns',['fvc_pred',
                         'fev1fvc_ratio',                       
                         'copd',
                         'fev1_diff',
-                        'fvc_diff'])
+                        'fvc_diff', 
+                        'gold'])
 
 
 configs.add_variable('BATCH_SIZE',lambda self: get_batch_size(self))
@@ -248,7 +268,10 @@ configs.add_self_referenced_variable_from_dict('get_labels_columns_pft', 'labels
 configs.add_self_referenced_variable_from_dict('get_labels_columns_copd', 'output_copd',
                                       {True: ['copd'], False: []}) 
 
-configs.add_variable('get_labels_columns',lambda self: self['get_labels_columns_pft'] + self['get_labels_columns_copd'])
+configs.add_self_referenced_variable_from_dict('get_labels_columns_gold', 'output_gold',
+                                      {True: ['gold'], False: []}) 
+
+configs.add_variable('get_labels_columns',lambda self: self['get_labels_columns_pft'] + self['get_labels_columns_copd']+ self['get_labels_columns_gold'])
 
 configs.add_self_referenced_variable_from_dict('pft_plot_columns', 'labels_to_use',
                                       {'two_ratios': [['fev1fvc_predrug'],['fev1_ratio']], 
@@ -356,6 +379,6 @@ def get_individual_loss_weights(self):
 configs.add_predefined_set_of_configs('frozen_densenet', {})
 
 configs.add_predefined_set_of_configs('copd_only', {'kind_of_loss':'bce', 
-                                                          'labels_to_use':None,
+                                                          'labels_to_use':'none',
                                                           'network_output_kind':'sigmoid',
                                                           'output_copd':True})

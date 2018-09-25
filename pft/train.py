@@ -42,6 +42,12 @@ except:
     
 from configs import configs
 
+parser = argparse.ArgumentParser()
+parser.add_argument('-c','--cvd', required=False)
+parser.add_argument('-d','--dd_test', required=False)
+parser.add_argument('-m','--model_to_load', required=False)
+args = vars(parser.parse_args())
+
 configs.load_predefined_set_of_configs('cnn20180628') #'densenet', 'frozen_densenet', 'p1', 'fc20180524', 'cnn20180628'
 
 configs.load_predefined_set_of_configs('resnet18')
@@ -65,20 +71,56 @@ configs.load_predefined_set_of_configs('resnet18')
 
 #configs['load_image_features_from_file'] = False
 configs['data_to_use']  = ['2012-2016', '2017']
-#configs['BATCH_SIZE']=20
+configs['BATCH_SIZE']=20
 #configs['densenet_dropout'] = 0.0
 #configs['use_dropout_hidden_layers'] = 0.0
 configs['pretrain_kind']  = 'imagenet'
-configs['maximum_date_diff']  = 2
+if args['dd_test'] is not None:
+    configs['max_date_diff_to_use_for_test'] = int(args['dd_test'])
+else:
+    configs['max_date_diff_to_use_for_test'] = 2
+configs['maximum_date_diff']  = 10
 configs['remove_lung_transplants']  = True
-
+configs['positions_to_use'] = ['PA']
 configs['n_hidden_layers'] = 2
 configs['channels_hidden_layers'] = 256 # only used if configs['n_hidden_layers']>0
 configs['use_dropout_hidden_layers'] = 0.25 # 0 turn off dropout; 0.25 gives seems to give about the same results as l = 0.05 # only used if configs['n_hidden_layers']>0
-configs['use_batchnormalization_hidden_layers'] = True
+configs['use_batchnormalization_hidden_layers'] = False
 configs['remove_pre_avg_pool'] = False
 configs['l2_reg_fc'] = 0.0
 configs['l2_reg_cnn'] = 0.0
+#configs['splits_to_use'] = 'include_test_in_training'
+configs['splits_to_use'] = 'test_with_val'
+#configs['splits_to_use'] = 'test_with_test'
+configs['balance_dataset_by_fvcfev1_predrug'] = False
+configs['remove_repeated_pfts'] = True
+configs['remove_repeated_images'] = True
+configs['remove_cases_more_one_image_per_position'] = True
+#configs['scheduler_to_use'] = 'steps'
+#configs['save_model']=True
+#configs['load_model']=True
+#configs['skip_train']=True
+#configs['N_EPOCHS'] = 1
+#configs['use_sigmoid_channel']=True
+configs['model_to_load'] = '20180921-151934-5939'
+if args['model_to_load'] is not None:
+    configs['model_to_load'] = args['model_to_load']
+configs['override_max_axis_graph'] = 1.5
+#configs['prefix_model_to_load']='_'
+#configs['create_csv_from_dataset'] = True
+#configs['output_gold'] = True
+#configs['labels_to_use'] = 'none'
+#configs['first_parameter_cnn_not_to_freeze'] = 'layer3'
+#configs['kind_of_loss'] = 'l2'
+#configs['individual_kind_of_loss'] = {'fev1_ratio':'l1'}
+#configs['n_channels_local_convolution'] = 16
+#configs['channels_hidden_layers'] = 64
+#configs['n_hidden_layers'] = 0
+#configs['use_extra_inputs'] = False
+#configs['use_local_conv'] = True
+#configs['use_dropout_hidden_layers'] = 0.0
+#configs['network_output_kind'] = 'linear'
+
 #configs['initial_lr_fc'] = 0.001
 #configs['initial_lr_cnn'] = 0.001
 
@@ -108,11 +150,9 @@ NUM_WORKERS = 0
 # faster to have one worker and use non thread safe h5py to load preprocessed images
 # than other tested options
 
-parser = argparse.ArgumentParser()
-parser.add_argument('-c','--cvd', required=False)
-args = vars(parser.parse_args())
 
-if configs['machine_to_use'] == 'titan':
+
+if configs['machine_to_use'] == 'titan' or args['cvd'] is not None:
     if args['cvd'] is None:
         raise_with_traceback(ValueError('You should set Cuda Visible Devices (-c or --cvd) when using titan'))
     os.environ['CUDA_VISIBLE_DEVICES'] = args['cvd']
@@ -235,7 +275,12 @@ def run_epoch(loaders, model, criterion, optimizer, epoch=0, n_epochs=0, train=T
         averages = extra_outs['averages']
         ws = extra_outs['ws']
         vs = extra_outs['vs']
-        
+        spatial_outputs = extra_outs['spatial_outputs']
+        '''
+        print(train)
+        print(i)
+        entropy_loss = metrics.get_last_layer_entropy(spatial_outputs)**2
+        '''
         if not configs['use_mean_var_loss']:
             losses = []
             
@@ -274,7 +319,7 @@ def run_epoch(loaders, model, criterion, optimizer, epoch=0, n_epochs=0, train=T
             print(mutual_exclusivity_loss(ws))
             print(orthogonality_loss(vs))
             print(loss)
-            loss =loss + configs['mutual_exclusivity_loss_multiplier']*mutual_exclusivity_loss(ws) + configs['gate_uniformity_loss_multiplier']*gate_uniformity_loss(ws) +  configs['gate_orthogonal_loss_multiplier']*orthogonality_loss(vs)
+            loss =loss + configs['mutual_exclusivity_loss_multiplier']*mutual_exclusivity_loss(ws) + configs['gate_uniformity_loss_multiplier']*gate_uniformity_loss(ws) +  configs['gate_orthogonal_loss_multiplier']*orthogonality_loss(vs) #+ entropy_loss
         y_corr, y_pred, y_corr_all = (np.concatenate(x, axis = 0) for x in ((y_corr, target_var_fixed), (y_pred, output_var_fixed), (y_corr_all, all_target_var_fixed)))
         
         
@@ -320,7 +365,9 @@ def get_loader(set_of_images, cases_to_use, all_labels, transformSequence, split
         else:
             all_joined_table = pd.merge(all_joined_table, current_df, on=['subjectid', 'crstudy'])
     for i in range(len(set_of_images)):
-        cases_to_use_on_set_of_images.append(pd.merge(select_columns_one_table_after_merge(all_joined_table, '_'+str(i), ['subjectid', 'crstudy']),all_labels, on=['subjectid', 'crstudy']))
+        a = select_columns_one_table_after_merge(all_joined_table, '_'+str(i), ['subjectid', 'crstudy', 'pftid'])
+        b = pd.merge(a,all_labels, on=['subjectid', 'crstudy', 'pftid'])
+        cases_to_use_on_set_of_images.append(b)
         
         if verbose:
             logging.info('size ' + split + ' ' + str(i) +': '+str(np.array(cases_to_use_on_set_of_images[i]).shape[0]))
@@ -366,38 +413,96 @@ def load_training_pipeline(cases_to_use, all_images, all_labels, trainTransformS
             test_images = cases_to_use[cases_to_use['subjectid']==i]
         else:
             subjectids = np.array(cases_to_use['subjectid'].unique())
+            
+            '''
+            with open('./validationsubjectids.pkl') as f:
+                valids = pickle.load(f)
+            print(len(subjectids))
+            subjectids = np.setdiff1d(subjectids,np.array(list(valids)))
+            print(len(subjectids))
+            prng = np.random.RandomState()
+            queue = prng.permutation(subjectids.shape[0])
+            testids = set(subjectids[queue[:int(576)]])
+            pickle.dump( testids, open( "./testsubjectids.pkl", "wb" ) )
+            1/0
+            '''
+            
             if configs['use_fixed_test_set']:
                 try:
-                    with open('./testsubjectids.pkl') as f:  # Python 3: open(..., 'rb')
+                    with open('./testsubjectids.pkl') as f: 
                         testids = pickle.load(f)
+                        
                 except TypeError:
                     with open('./testsubjectids.pkl', 'rb') as f:
                         testids = pickle.load(f, encoding='latin1')
+                        
+                try:
+                    with open('./validationsubjectids.pkl') as f:
+                        valids = pickle.load(f)
+                        
+                except TypeError:
+                    with open('./validationsubjectids.pkl', 'rb') as f:
+                        valids = pickle.load(f, encoding='latin1')
+                        
             else:
                 prng = np.random.RandomState()
                 queue = prng.permutation(subjectids.shape[0])
                 testids = set(subjectids[queue[:int(0.2*subjectids.shape[0])]])
+            
+            if configs['splits_to_use']=='include_val_in_training':
+                valids = set([])
+            if configs['splits_to_use']=='include_test_in_training':
+                testids = set([])
+            val_images = cases_to_use.loc[cases_to_use['subjectid'].isin(valids)]
             test_images = cases_to_use.loc[cases_to_use['subjectid'].isin(testids)]
-            train_images = cases_to_use.loc[~cases_to_use['subjectid'].isin(testids)]  
+            
+            train_images = cases_to_use.loc[~cases_to_use['subjectid'].isin(testids) & ~cases_to_use['subjectid'].isin(valids)]  
+            
+            assert(len(pd.merge(test_images, train_images, on=['subjectid'])) == 0)
+            assert(len(pd.merge(val_images, train_images, on=['subjectid'])) == 0)
+            assert(len(pd.merge(test_images, val_images, on=['subjectid'])) == 0)
+            assert(len(test_images['subjectid'].unique()) + len(val_images['subjectid'].unique()) + len(train_images['subjectid'].unique()) == len(subjectids))
+
             assert(len(pd.merge(test_images, train_images, on=['subjectid'])) == 0)
 
-        logging.info('total images training: '+str(np.array(train_images).shape[0]))
-        logging.info('total images test: '+str(np.array(test_images).shape[0]))
+        logging.info('total cases training: '+str(np.array(train_images).shape[0]))
+        logging.info('total cases test: '+str(np.array(test_images).shape[0]))
+        logging.info('total cases val: '+str(np.array(val_images).shape[0]))
         
-        train_loader=get_loader(all_images, train_images, all_labels, trainTransformSequence, split = 'train')
+        train_labels = all_labels
+        train_labels = train_labels[(train_labels['Date_Diff'] <= configs['maximum_date_diff'])]
+        
+        train_loader=get_loader(all_images, train_images, train_labels, trainTransformSequence, split = 'train')
         if i == 0:
-            eval_train_loader=get_loader(all_images, train_images, all_labels, testTransformSequence, split = 'eval_train', verbose = False)
+            eval_train_loader=get_loader(all_images, train_images, train_labels, testTransformSequence, split = 'eval_train', verbose = False)
         
         test_labels = all_labels
         
         if configs['use_only_2017_for_test']:
             test_labels = test_labels[(test_labels['dataset'] =='2017')]
-            
-        test_loader=get_loader(all_images, test_images, test_labels, testTransformSequence, 'validation')
+        
+        if not configs['use_lung_transplant_in_test']:
+            test_labels = test_labels[(test_labels['lung_transplant'] ==0)]
+        
+        if configs['max_date_diff_to_use_for_test'] is not None:
+            test_labels = test_labels.loc[(test_labels['Date_Diff'] <= configs['max_date_diff_to_use_for_test'])]
+        
+        #if configs['remove_repeated_pfts_in_test']: 
+        #    test_labels = test_labels.sort_values('Date_Diff', ascending=True).drop_duplicates('PFTExam_Global_ID', keep = 'first')
+        #if configs['remove_repeated_images_in_test']: 
+        #    test_labels = test_labels.sort_values('Date_Diff', ascending=True).drop_duplicates('CRStudy_Global_ID', keep = 'first')
+        
+        logging.info('len of test labels: ' + str(len(test_labels)))
+        
+        if configs['splits_to_use']=='include_val_in_training' or configs['splits_to_use']=='test_with_test':
+            test_loader = get_loader(all_images, test_images, test_labels, testTransformSequence, 'test')
+        elif configs['splits_to_use']=='test_with_val' or configs['splits_to_use']=='include_test_in_training':
+            test_loader = get_loader(all_images, val_images, test_labels, testTransformSequence, 'validation')
 
         logging.info('finished loaders and generators. starting models')
         
         model = model_loading.get_model(num_ftrs)
+        print(model)
         
         logging.info('finished models. starting criterion')
         
@@ -411,17 +516,25 @@ def load_training_pipeline(cases_to_use, all_images, all_labels, trainTransformS
           'bce':nn.BCELoss(size_average = True).cuda(),
           'relative_mse':relative_error_mse_loss}
         criterion = [{'loss':losses_dict[configs['get_individual_kind_of_loss'][k]], 'weight':configs['get_individual_loss_weights'][k]} for k in configs['get_labels_columns']]
+        cnn_parameters_not_to_freeze = []
+        for one_cnn in model.module.cnn:
+            first_parameter_found = False
+            for name, parameter in one_cnn.named_parameters():
+                if configs['first_parameter_cnn_not_to_freeze'] in name:
+                    first_parameter_found = True
+                if first_parameter_found:
+                    cnn_parameters_not_to_freeze.append(parameter)
         if configs['optimizer']=='adam':
             optimizer = optim.Adam( [
               {'params':model.module.stn.parameters(), 'lr':configs['initial_lr_location'], 'weight_decay':configs['l2_reg_location']},
               {'params':model.module.final_layers.parameters(), 'lr':configs['initial_lr_fc'], 'weight_decay':configs['l2_reg_fc']}, 
-              {'params':model.module.cnn.parameters(), 'lr':configs['initial_lr_cnn'], 'weight_decay':configs['l2_reg_cnn']}
+              {'params':cnn_parameters_not_to_freeze, 'lr':configs['initial_lr_cnn'], 'weight_decay':configs['l2_reg_cnn']}
               ], lr=configs['initial_lr_fc'] , weight_decay=configs['l2_reg_fc'])
         elif configs['optimizer']=='nesterov':
             optimizer = optim.SGD( [
               {'params':model.module.stn.parameters(), 'lr':configs['initial_lr_location'], 'weight_decay':configs['l2_reg_location']},
               {'params':model.module.final_layers.parameters(), 'lr':configs['initial_lr_fc'], 'weight_decay':configs['l2_reg_fc']}, 
-              {'params':model.module.cnn.parameters(), 'lr':configs['initial_lr_cnn'], 'weight_decay':configs['l2_reg_cnn']}
+              {'params':cnn_parameters_not_to_freeze, 'lr':configs['initial_lr_cnn'], 'weight_decay':configs['l2_reg_cnn']}
               ], lr=configs['initial_lr_fc'] , momentum = 0.9, nesterov = True, weight_decay=configs['l2_reg_fc'])
         '''
         if utils.compare_versions(torch.__version__, '0.4.0')>=0:
@@ -429,8 +542,10 @@ def load_training_pipeline(cases_to_use, all_images, all_labels, trainTransformS
         else:
             scheduler = utils.ReduceLROnPlateau(optimizer, factor = 0.1, patience = 5, mode = 'min', verbose = True)
         '''
-        scheduler = utils.ReduceLROnPlateau(optimizer, factor = 0.1, patience = 5, mode = 'min', verbose = True)
-         
+        if configs['scheduler_to_use'] == 'plateau':
+            scheduler = utils.ReduceLROnPlateau(optimizer, factor = 0.1, patience = 5, mode = 'min', verbose = True)
+        if configs['scheduler_to_use'] == 'steps':
+            scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=configs['milestones_steps'], gamma=0.1)
         models = models + [model]
         criterions = criterions + [criterion]
         optimizers = optimizers + [optimizer]
@@ -442,9 +557,9 @@ def load_training_pipeline(cases_to_use, all_images, all_labels, trainTransformS
 def concat_with_expansion(x,y, axis):
     return np.concatenate((x, np.expand_dims(y, axis = 2)), axis = axis)
 
-def save_model(models):
+def save_model(models, prefix = ''):
     for i, model in enumerate(models):
-        torch.save(model.state_dict(), './models/' + configs['output_model_name'] + '_' + str(i))
+        torch.save(model.state_dict(), './models/' + prefix + '_' +  configs['output_model_name'] + '_' + str(i))
 
 def load_model(models, input_model_name):
     for i, model in enumerate(models):
@@ -493,24 +608,35 @@ def train(models, criterions, optimizers, schedulers, train_loaders, test_loader
         all_train_losses =np.array([])
         #select patient id instead of line
         for i in training_range:
-            
             model = models[i]
             criterion = criterions[i]
             optimizer = optimizers[i]
             train_loader = train_loaders[i]
             test_loader = test_loaders[i]
-        
-            _, _, loss, _, _, _ = run_epoch(
-                loaders=train_loader,
-                model=model,
-                criterion=criterion,
-                optimizer=optimizer,
-                epoch=epoch,
-                n_epochs=n_epochs,
-                train=True
-                ) 
+          
+            if not configs['skip_train']:
+                _, _, loss, _, _, _ = run_epoch(
+                    loaders=train_loader,
+                    model=model,
+                    criterion=criterion,
+                    optimizer=optimizer,
+                    epoch=epoch,
+                    n_epochs=n_epochs,
+                    train=True
+                    )
             
+            _, _, loss, y_corr_train, y_pred_train, y_corr_all_train = run_epoch(
+                  loaders=eval_train_loader,
+                  model=model,
+                  criterion=criterion,
+                  optimizer=None,
+                  epoch=epoch,
+                  n_epochs=n_epochs,
+                  train=False
+                )
+                
             all_train_losses = np.concatenate((all_train_losses, loss), axis=0)
+                
             _, _, loss, y_corr_test, y_pred_test, y_corr_all_test = run_epoch(
                 loaders=test_loader,
                 model=model,
@@ -520,27 +646,23 @@ def train(models, criterions, optimizers, schedulers, train_loaders, test_loader
                 n_epochs=n_epochs,
                 train=False
                 )
-            
-            if epoch==n_epochs or True:
-                _, _, _, y_corr_train, y_pred_train, y_corr_all_train = run_epoch(
-                      loaders=eval_train_loader,
-                      model=model,
-                      criterion=criterion,
-                      optimizer=None,
-                      epoch=epoch,
-                      n_epochs=n_epochs,
-                      train=False
-                    )
                 
-                ys_corr_train, ys_pred_train, ys_corr_all_train, ys_corr_test, ys_pred_test, ys_corr_all_test = \
+            ys_corr_train, ys_pred_train, ys_corr_all_train, ys_corr_test, ys_pred_test, ys_corr_all_test = \
                   (concatenate_funcation(x,y) for x,y in \
                     ((ys_corr_train,y_corr_train),(ys_pred_train,y_pred_train),(ys_corr_all_train,y_corr_all_train), (ys_corr_test,y_corr_test),(ys_pred_test,y_pred_test), (ys_corr_all_test,y_corr_all_test)))
         
             if configs['use_lr_scheduler']:
                 if epoch >=configs['first_epoch_scheduler_step']:
                     schedulers[i].step(loss)
-            all_val_losses = np.concatenate((all_val_losses, loss), axis=0)
             
+            all_val_losses = np.concatenate((all_val_losses, loss), axis=0)
+        if configs['save_model']:
+                if epoch == 1:
+                    best_val_loss = np.average(all_val_losses)
+                is_best = bool(np.average(all_val_losses) <= best_val_loss)
+                if is_best:
+                    best_val_loss = np.average(all_val_losses)
+                    save_model( models, 'best_epoch')
         logging.info('Train loss ' + str(epoch) + '/' + str(n_epochs) + ': ' +str(np.average(all_train_losses)))
         logging.info('Val loss ' + str(epoch) + '/' + str(n_epochs) + ': '+str(np.average(all_val_losses)))
         
@@ -553,25 +675,75 @@ def train(models, criterions, optimizers, schedulers, train_loaders, test_loader
             
             metrics.report_final_results(ys_corr_train , ys_pred_train, ys_corr_all_train, train = True)
             metrics.report_final_results(ys_corr_test , ys_pred_test, ys_corr_all_test, train = False)
+            
 
 def merge_images_and_labels(all_images, all_labels):
+  
+    if configs['create_csv_from_dataset']:
+        for i, image_set in enumerate(all_images):
+            #print(image_set.columns) [u'crstudy', u'filepath', u'position', u'scanid', u'subjectid',u'image_index', u'preprocessed'],
+
+            a = image_set[['subjectid', 'crstudy']].groupby(['subjectid', 'crstudy']).size().reset_index(name="count_"+str(image_set['position'].iloc[0]))
+            
+            if i == 0:
+                all_images_merged = a
+            else:
+                all_images_merged = pd.merge(all_images_merged, a, on=['subjectid', 'crstudy'], how = 'outer')
+        all_images_merged.fillna(value={'count_PA':0, 'count_LAT':0, 'count_AP':0}, inplace = True)
+        
+        joined_tables = pd.merge(all_images_merged, all_labels, on=['subjectid', 'crstudy'])
+        assert(len(joined_tables[['subjectid', 'crstudy']].groupby(['subjectid', 'crstudy']).size().reset_index(name="count"))==len(all_images_merged))
+        len_joined_tables = len(joined_tables)
+        joined_tables = joined_tables[['subjectid','PFTExam_Global_ID', 'CRStudy_Global_ID', 'Date_Diff', 'count_PA', 'count_AP', 'count_LAT', 'dataset', 'fev1_ratio', 'fev1fvc_predrug', 'lung_transplant']]
+        
+        
+        
+        try:
+            with open('./testsubjectids.pkl') as f: 
+                testids = pickle.load(f)
+        except TypeError:
+            with open('./testsubjectids.pkl', 'rb') as f:
+                testids = pickle.load(f, encoding='latin1')
+        try:
+            with open('./validationsubjectids.pkl') as f:
+                valids = pickle.load(f)
+        except TypeError:
+            with open('./validationsubjectids.pkl', 'rb') as f:
+                valids = pickle.load(f, encoding='latin1')
+        joined_tables['split'] = 'train'
+        joined_tables.loc[joined_tables['subjectid'].isin(testids),'split'] = 'test'
+        joined_tables.loc[joined_tables['subjectid'].isin(valids),'split'] = 'val'
+        assert(len_joined_tables==len(joined_tables))
+        joined_tables.to_csv('dataset_summary.csv', sep=',', encoding='utf-8')
+        1/0
+    
+    
     for i, image_set in enumerate(all_images):
+        a = image_set[['subjectid', 'crstudy']].groupby(['subjectid', 'crstudy']).size().reset_index(name="count")
+        if configs['remove_cases_more_one_image_per_position']:
+            a = a[a['count']<2]
         if i == 0:
-            all_images_merged = image_set[['subjectid', 'crstudy']]
+            all_images_merged = a[['subjectid', 'crstudy']]
         else:
-            all_images_merged = pd.merge(all_images_merged, image_set, on=['subjectid', 'crstudy'])[['subjectid', 'crstudy']]
+            all_images_merged = pd.merge(all_images_merged, a, on=['subjectid', 'crstudy'])[['subjectid', 'crstudy']]
     joined_tables = pd.merge(all_images_merged, all_labels, on=['subjectid', 'crstudy'])
     
     if configs['remove_lung_transplants']:
         joined_tables = joined_tables[(joined_tables['lung_transplant'] ==0)]
-        
-    joined_tables = joined_tables[(joined_tables['Date_Diff'] < configs['maximum_date_diff'])]
     
+    #joined_tables = joined_tables[(joined_tables['Date_Diff'] <= configs['maximum_date_diff'])]
     #TODO: severity test
     #joined_tables = joined_tables[(joined_tables['fev1fvc_predrug'] > 0.7) | ((joined_tables['fev1_ratio'] < 0.5) & (joined_tables['fev1fvc_predrug'] < 0.7))]
-    #TODO: lung transplant test
-    #joined_tables = joined_tables[(joined_tables['lung_transplant'] ==0)]
-    cases_to_use = joined_tables[['subjectid', 'crstudy']].groupby(['subjectid', 'crstudy']).count().reset_index()
+    
+    joined_tables = joined_tables[['subjectid', 'crstudy', 'pftid', 'CRStudy_Global_ID', 'PFTExam_Global_ID', 'Date_Diff']].groupby(['subjectid', 'crstudy', 'pftid', 'CRStudy_Global_ID', 'PFTExam_Global_ID', 'Date_Diff']).count().reset_index()
+
+    if configs['remove_repeated_pfts']: 
+        joined_tables = joined_tables.sort_values('Date_Diff', ascending=True).drop_duplicates('PFTExam_Global_ID', keep = 'first')
+    if configs['remove_repeated_images']: 
+        joined_tables = joined_tables.sort_values('Date_Diff', ascending=True).drop_duplicates('CRStudy_Global_ID', keep = 'first')
+
+    cases_to_use = joined_tables[['subjectid', 'crstudy', 'pftid']].groupby(['subjectid', 'crstudy', 'pftid']).count().reset_index()
+    
     return cases_to_use
 
 def main():

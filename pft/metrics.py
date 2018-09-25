@@ -6,6 +6,7 @@ from configs import configs
 import logging
 import sklearn.metrics
 import scipy.stats
+import torch
 
 # defining what variables are going to be ploted (plot_columns) and how they are calculated
 # using the variables present in labels_to_use
@@ -26,7 +27,7 @@ def absolutes_and_important_ratios_plot_calc(values, all_true_values, name):
             return 1  - get_plot_value(values, all_true_values, 'fev1_diff')/get_plot_value(values, all_true_values, 'fev1_pred', use_true = True)
     elif name=='fev1fvc_predrug':
         if 'fev1_predrug' in configs['get_labels_columns']:
-            return get_plot_value(values, all_true_values, 'fev1_predrug')/get_plot_value(values, all_true_values,'fvc_predrug')
+            return get_plot_value(values, all_true_values, 'fev1_predrug')/(get_plot_value(values, all_true_values,'fvc_predrug')+1e-20)
         elif 'fev1_diff' in configs['get_labels_columns']:
             return  (get_plot_value(values, all_true_values, 'fev1_pred', use_true = True) - get_plot_value(values, all_true_values, 'fev1_diff'))/(get_plot_value(values, all_true_values, 'fvc_pred', use_true = True) - get_plot_value(values, all_true_values, 'fvc_diff'))
     else:
@@ -70,7 +71,10 @@ def plot_results(y_corr, y_pred, y_corr_all, train_string, is_error_plot = False
             ax = plt.gca()
             ylim = ax.get_ylim()
             xlim = ax.get_xlim()
-            final_axis = (min(ylim[0],xlim[0]), max(ylim[1],xlim[1]))
+            max_final_axis = max(ylim[1],xlim[1])
+            if configs['override_max_axis_graph'] is not None:
+                max_final_axis = min(max_final_axis, configs['override_max_axis_graph'])
+            final_axis = (min(ylim[0],xlim[0]), max_final_axis)
             ax.set_ylim(final_axis)
             ax.set_xlim(final_axis)
             plt.plot([final_axis[0], final_axis[1]], [final_axis[0], final_axis[1]], 'k-', lw=1)
@@ -102,21 +106,35 @@ def sum_dictionaries_by_key(x,y):
   
 def get_precision_recall_from_dictionary(d):
     try:
-        precision = d['tp']/float(d['tp']+d['fp'])
+        precision_copd = d['tp']/float(d['tp']+d['fp'])
     except FloatingPointError:
-        precision = 0
+        precision_copd = 0
         print(float(d['tp']+d['fp']))
     try:
-        recall = d['tp']/float(d['tp']+d['fn'])
+        precision_noncopd = d['tn']/float(d['tn']+d['fn'])
     except FloatingPointError:
-        recall = 0
+        precision_noncopd = 0
+        print(float(d['tn']+d['fn']))
+    try:
+        recall_copd = d['tp']/float(d['tp']+d['fn'])
+    except FloatingPointError:
+        recall_copd = 0
         print(float(d['tp']+d['fn']))
     try:
-        f1score = 2*precision*recall/(precision+recall)
+        recall_noncopd = d['tn']/float(d['tn']+d['fp'])
     except FloatingPointError:
-        f1score = 0
+        recall_noncopd = 0
+        print(d['tn']/float(d['tn']+d['fp']))
+    try:
+        f1score_copd = 2*precision_copd*recall_copd/(precision_copd+recall_copd)
+    except FloatingPointError:
+        f1score_copd = 0
+    try:
+        f1score_noncopd = 2*precision_noncopd*recall_noncopd/(precision_noncopd+recall_noncopd)
+    except FloatingPointError:
+        f1score_noncopd = 0
     accuracy = (d['tp']+d['tn'])/float(d['tp']+d['fp']+d['fn']+d['tn'])
-    return {'precision':precision, 'recall':recall, 'f1score':f1score, 'accuracy': accuracy}
+    return {'precision':precision_copd, 'recall':recall_copd, 'f1score':f1score_copd, 'precision_noncopd':precision_noncopd, 'recall_noncopd':recall_noncopd, 'f1score_noncopd':f1score_noncopd, 'accuracy': accuracy}
   
 def r2(y_corr, y_pred):
     y_corr_mean = np.mean(y_corr)
@@ -137,13 +155,24 @@ def get_accuracies(y_corr, y_pred):
     perfs = perf_measure(y_actual = y_corr, y_hat = (y_pred>0.5)*1)
     accuracies['perfs'] = perfs
     accuracies['scores'] = get_precision_recall_from_dictionary(perfs)
-    accuracies['accuracy'] = (perfs['tn']+perfs['tp'])/float(perfs['tn']+perfs['tp']+perfs['fp']+perfs['fn'])
+    #accuracies['accuracy'] = (perfs['tn']+perfs['tp'])/float(perfs['tn']+perfs['tp']+perfs['fp']+perfs['fn'])
     return accuracies
 
 def mae(y_corr, y_pred):
     result = np.mean(np.square(y_pred-y_corr))
     return result
-  
+
+def get_last_layer_entropy(spatial_outputs):
+    spatial_output = torch.cat(spatial_outputs, dim = 1)
+
+    #spatial_output = (spatial_output>0).float()*1.0
+    spatial_output = torch.clamp(spatial_output*10000, 0.0, 1.0)
+    batch_size = spatial_output.size()[0]
+    pi = torch.sum(spatial_output,dim = 0).view([spatial_output.size()[1],spatial_output.size()[2]*spatial_output.size()[3]])/batch_size
+    entropy = torch.mean(torch.sum(-torch.log2(pi+1e-10)*pi-torch.log2(1-pi+1e-10)*(1-pi), dim = 1)).item()
+    print(entropy)
+    return entropy
+
 def report_final_results(y_corr , y_pred, y_corr_all, train):
     if train:
         train_string = 'train'
@@ -153,7 +182,7 @@ def report_final_results(y_corr , y_pred, y_corr_all, train):
     y_corr, y_pred, y_corr_all = configs['pre_transform_labels'].apply_inverse_transform((y_corr, y_pred, y_corr_all))
     #absolutes_and_important_ratios_plot_calc(y_pred, y_corr_all, 'fev1_ratio')
     plot_results(y_corr, y_pred, y_corr_all, train_string)
-    plot_results(y_corr, y_pred, y_corr_all, train_string, is_error_plot = True)
+    #plot_results(y_corr, y_pred, y_corr_all, train_string, is_error_plot = True)
         
     regression_metrics = {}
     correlations = {}
@@ -161,8 +190,15 @@ def report_final_results(y_corr , y_pred, y_corr_all, train):
     accuracies = {}
     
     if ('fev1_ratio' in configs['get_labels_columns'] or 'fev1_predrug' in configs['get_labels_columns']) and ('fev1fvc_predrug' in configs['get_labels_columns'] or ('fev1_predrug' in configs['get_labels_columns'] and 'fvc_predrug' in configs['get_labels_columns'])):
-        accuracies['confusion_gold'] = sklearn.metrics.confusion_matrix(get_gold(absolutes_and_important_ratios_plot_calc(y_corr, y_corr_all, 'fev1_ratio'), absolutes_and_important_ratios_plot_calc(y_corr, y_corr_all, 'fev1fvc_predrug')), get_gold(absolutes_and_important_ratios_plot_calc(y_pred, y_corr_all, 'fev1_ratio'), absolutes_and_important_ratios_plot_calc(y_pred, y_corr_all, 'fev1fvc_predrug')))
-    
+        accuracies['confusion_gold'] = sklearn.metrics.confusion_matrix(get_gold(absolutes_and_important_ratios_plot_calc(y_corr, y_corr_all, 'fev1_ratio'), 
+                                                                                 absolutes_and_important_ratios_plot_calc(y_corr, y_corr_all, 'fev1fvc_predrug')), 
+                                                                        get_gold(absolutes_and_important_ratios_plot_calc(y_pred, y_corr_all, 'fev1_ratio'), 
+                                                                                 absolutes_and_important_ratios_plot_calc(y_pred, y_corr_all, 'fev1fvc_predrug')))
+    if len(configs['get_labels_columns_gold'])>0:
+        print(configs['get_labels_columns_gold'])
+        accuracies['confusion_gold'] = sklearn.metrics.confusion_matrix(get_gold(absolutes_and_important_ratios_plot_calc(y_corr, y_corr_all, 'fev1_ratio'), 
+                                                                                 absolutes_and_important_ratios_plot_calc(y_corr, y_corr_all, 'fev1fvc_predrug')), 
+                                                                        absolutes_and_important_ratios_plot_calc(y_pred, y_corr_all, 'gold'))
     for k in range(len(output_variables)):
         name = output_variables[k]
         this_y_corr = absolutes_and_important_ratios_plot_calc(y_corr, y_corr_all, name)

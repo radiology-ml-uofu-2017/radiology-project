@@ -156,6 +156,49 @@ class CenterCropNumpy(RandomCropNumpy):
         i = (h - th)//2
         j = (w - tw)//2
         return i, j, th, tw
+
+class CropSideCenterNumpy(RandomCropNumpy):
+
+    @staticmethod
+    def get_params(img, output_size):
+        """Get parameters for ``crop`` for a random crop.
+
+        Args:
+            img (PIL Image): Image to be cropped.
+            output_size (tuple): Expected output size of the crop.
+
+        Returns:
+            tuple: params (i, j, h, w) to be passed to ``crop`` for random crop.
+        """
+        c, w, h = img.shape
+        side = randint(0,1)
+        j = (w)//4
+        i = 0
+        
+        return i, j, h, w//2
+      
+class CropOneSideNumpy(RandomCropNumpy):
+
+    @staticmethod
+    def get_params(img, output_size):
+        """Get parameters for ``crop`` for a random crop.
+
+        Args:
+            img (PIL Image): Image to be cropped.
+            output_size (tuple): Expected output size of the crop.
+
+        Returns:
+            tuple: params (i, j, h, w) to be passed to ``crop`` for random crop.
+        """
+        c, w, h = img.shape
+        side = randint(0,1)
+        if side == 1:
+            j = 0
+        else:
+            j = (w)//2
+        i = 0
+        
+        return i, j, h, w//2
       
 '''
 class RandomCropNumpy(object):

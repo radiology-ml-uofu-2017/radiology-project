@@ -17,6 +17,7 @@ import h5py
 from collections import Counter
 import utils
 import math
+from torch.nn.modules.utils import _pair
 
 np.seterr(divide = "raise", over="warn", under="warn",  invalid="raise")
 
@@ -52,6 +53,16 @@ def load_pretrained_chexnet():
     chexnetModel = torch.nn.DataParallel(chexnetModel).cuda()
     if configs['pretrain_kind']=='chestxray':
         chexnetModel = load_checkpoint(chexnetModel)
+    if configs['use_local_conv']:
+        chexnetModel.module.model.layer4.add_module('conv_local_1', Conv2dLocal(in_height= 7, in_width= 7, in_channels=512, out_channels = configs['n_channels_local_convolution'],
+                 kernel_size= (3,3), stride=1, padding=1, bias=True, dilation=1))      
+        #chexnetModel.module.model.layer4.add_module('relu_local_conv', nn.ReLU(inplace= True))
+        #chexnetModel.module.model.layer4.add_module('conv_local_2',Conv2dLocal(in_height= 7, in_width= 7, in_channels=configs['n_channels_local_convolution'], out_channels = configs['n_channels_local_convolution'],
+        #         kernel_size= (3,3), stride=1, padding=1, bias=True, dilation=1))
+        #chexnetModel.layer4.1.bn1 = nn.Dropout2d(p=0.25)
+        #chexnetModel.module.model.layer4[1].bn1 = nn.Sequential()
+        #chexnetModel.layer4.1.bn2 = nn.Dropout2d(p=0.25)
+        #chexnetModel.module.model.layer4[1].bn2 = nn.Sequential()
     return chexnetModel
 
 class Flatten(nn.Module):
@@ -89,11 +100,13 @@ class FinalLayers(nn.Module):
         self.final_linear = ModelLastLinearLayer(self.fc_part.current_n_channels)#527)
     
     def forward(self, x, extra_fc_input, epoch ):
-        x = self.spatial_part(x)
+        x, spatial_outputs = self.spatial_part(x)
         #x, ws = self.fc_part(x, extra_fc_input, epoch)
         x, extra_outs = self.fc_part(x, extra_fc_input)
         x, extra_outs2 = self.final_linear(x)
-        return x, utils.merge_two_dicts(extra_outs,extra_outs2)
+        dict_out = utils.merge_two_dicts(extra_outs,extra_outs2)
+        dict_out['spatial_outputs'] = spatial_outputs
+        return x, dict_out
       
 class ModelMoreInputs(nn.Module):
     def __init__(self, num_ftrs):
@@ -218,23 +231,32 @@ class STN(nn.Module):
             x = F.grid_sample(x, grid)
 
         return x
-      
+
+class quickAttention(nn.Module):
+    def forward(self, x):
+        return torch.nn.functional.sigmoid(x[:,0:1,:,:])*x
+
 def get_spatial_part_fc(num_ftrs):
     spatial_part = torch.nn.Sequential()
     spatial_part.add_module("spatial_output",torch.nn.Sequential())
     current_n_channels = num_ftrs
+    print(current_n_channels)
     if configs['use_conv11']:
         if configs['use_batchnormalization_hidden_layers']:
-            spatial_part.add_module("bn_conv11",torch.nn.BatchNorm2d(current_n_channels).cuda())
-        spatial_part.add_module("conv11",nn.Conv2d( in_channels = current_n_channels, out_channels =  configs['conv11_channels'], kernel_size = 1).cuda())
+            spatial_part.add_module("bn_conv11",torch.nn.BatchNorm2d(current_n_channels/2, momentum = 0.1).cuda())
+        spatial_part.add_module("conv11",nn.Conv2d( in_channels = current_n_channels/2, out_channels =  configs['conv11_channels'], kernel_size = 1).cuda())
+        if not configs['use_sigmoid_channel']: 
+            spatial_part.add_module("reluconv11",nn.ReLU().cuda())
+        current_n_channels = configs['conv11_channels']*2
+    if configs['use_sigmoid_channel']:  
+        spatial_part.add_module("sigmoid_channel",quickAttention().cuda())
         spatial_part.add_module("reluconv11",nn.ReLU().cuda())
-        current_n_channels = configs['conv11_channels']
     if not configs['remove_pre_avg_pool']:
         spatial_part.add_module("avgpool",nn.AvgPool2d(7).cuda())
     else:
         current_n_channels = current_n_channels*49
     
-    spatial_part.add_module("flatten",Flatten().cuda())
+    #spatial_part.add_module("flatten",Flatten().cuda())
     return spatial_part, current_n_channels
 
 class MeanVarLossMean(nn.Module):
@@ -391,9 +413,11 @@ class ModelSpatialToFlatPart(nn.Module):
                 index = 0
             else:
                 index = i            
-            all_outputs.append(self.spatial_part[index](spatial_output.contiguous()))
+            b = self.spatial_part[index](spatial_output.contiguous())
+            b = b.view(b.size(0), -1)
+            all_outputs.append(b)
         x = torch.cat(all_outputs, 1)
-        return x
+        return x,spatial_outputs
       
 class ModelLastLinearLayer(nn.Module):
     def __init__(self, current_n_channels):
@@ -416,7 +440,7 @@ class ModelLastLinearLayer(nn.Module):
                     min_range = configs['pre_transform_labels'].ranges_labels[col_name][0]
                     max_range = configs['pre_transform_labels'].ranges_labels[col_name][1]
                 spacing = configs['meanvarloss_discretization_spacing']
-                self.bins_list.append(torch.autograd.Variable(torch.arange(min_range, max_range+spacing/2.0, spacing).unsqueeze(0).cuda(async=True, device = 0), requires_grad=False) )
+                self.bins_list.append(torch.autograd.Variable(torch.arange(min_range, max_range+spacing, spacing).unsqueeze(0).cuda(async=True, device = 0), requires_grad=False) )
                 
             linear_out_model = MeanVarLossOutput(self.current_n_channels, self.bins_list).cuda()
         else:
@@ -623,6 +647,8 @@ def get_model(num_ftrs):
         outmodel = torch.nn.DataParallel(outmodel).cuda()
     else:
         outmodel = NonDataParallel(outmodel).cuda()
+    if configs['load_model']:
+        outmodel.load_state_dict(torch.load('models/'+configs['prefix_model_to_load']+'model' + configs['model_to_load'] + '_0'))
     return outmodel
 
 class Reference:
@@ -638,6 +664,119 @@ class Reference:
     def set_value(self, val):
         self._value = val
 
+class BasicBlockWithDropout(torchvision.models.resnet.BasicBlock):
+    expansion = 1
+
+    def __init__(self, inplanes, planes, stride=1, downsample=None):
+        super(BasicBlockWithDropout, self).__init__( inplanes, planes, stride, downsample)
+        
+        self.dropout = nn.Dropout2d(p=configs['densenet_dropout'])
+
+    def forward(self, x):
+        residual = x
+
+        out = self.conv1(x)
+        
+        out = self.bn1(out)
+        out = self.dropout(out)
+        out = self.relu(out)
+        
+        out = self.conv2(out)
+        out = self.bn2(out)
+        
+        if self.downsample is not None:
+            residual = self.downsample(x)
+
+        out += residual
+        out = self.relu(out)
+
+        return out
+
+def getMyResnet18(pretrained=False, **kwargs):
+    model = torchvision.models.ResNet(BasicBlockWithDropout, [2,2,2,2], **kwargs)
+    if pretrained:
+        model.load_state_dict(model_zoo.load_url('https://download.pytorch.org/models/resnet18-5c106cde.pth'))
+    return model
+
+#from https://gist.github.com/guillefix/23bff068bdc457649b81027942873ce5
+class Conv2dLocal(nn.Module):
+ 
+    def __init__(self, in_height, in_width, in_channels, out_channels,
+                 kernel_size, stride=1, padding=0, bias=True, dilation=1):
+        super(Conv2dLocal, self).__init__()
+ 
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.kernel_size = _pair(kernel_size)
+        self.stride = _pair(stride)
+        self.padding = _pair(padding)
+        self.dilation = _pair(dilation)
+ 
+        self.in_height = in_height
+        self.in_width = in_width
+        self.out_height = int(math.floor(
+            (in_height + 2 * self.padding[0] - self.dilation[0] * (self.kernel_size[0] - 1) - 1) / self.stride[0] + 1))
+        self.out_width = int(math.floor(
+            (in_width + 2 * self.padding[1] - self.dilation[1] * (self.kernel_size[1] - 1) - 1) / self.stride[1] + 1))
+        self.weight = torch.nn.parameter.Parameter(torch.Tensor(
+            self.out_height, self.out_width,
+            out_channels, in_channels, *self.kernel_size))
+        if bias:
+            self.bias = torch.nn.parameter.Parameter(torch.Tensor(
+                out_channels, self.out_height, self.out_width))
+        else:
+            self.register_parameter('bias', None)
+ 
+        self.reset_parameters()
+ 
+    def reset_parameters(self):
+        n = self.in_channels
+        for k in self.kernel_size:
+            n *= k
+        stdv = 1. / math.sqrt(n)
+        self.weight.data.uniform_(-stdv, stdv)
+        if self.bias is not None:
+            self.bias.data.uniform_(-stdv, stdv)
+ 
+    def __repr__(self):
+        s = ('{name}({in_channels}, {out_channels}, kernel_size={kernel_size}'
+             ', stride={stride}')
+        if self.padding != (0,) * len(self.padding):
+            s += ', padding={padding}'
+        if self.dilation != (1,) * len(self.dilation):
+            s += ', dilation={dilation}'
+        if self.bias is None:
+            s += ', bias=False'
+        s += ')'
+        return s.format(name=self.__class__.__name__, **self.__dict__)
+ 
+    def forward(self, input):
+        return conv2d_local(
+            input, self.weight, self.bias, stride=self.stride,
+            padding=self.padding, dilation=self.dilation)
+
+#from https://gist.github.com/guillefix/23bff068bdc457649b81027942873ce5
+def conv2d_local(input, weight, bias=None, padding=0, stride=1, dilation=1):
+    if input.dim() != 4:
+        raise NotImplementedError("Input Error: Only 4D input Tensors supported (got {}D)".format(input.dim()))
+    if weight.dim() != 6:
+        # outH x outW x outC x inC x kH x kW
+        raise NotImplementedError("Input Error: Only 6D weight Tensors supported (got {}D)".format(weight.dim()))
+ 
+    outH, outW, outC, inC, kH, kW = weight.size()
+    kernel_size = (kH, kW)
+ 
+    # N x [inC * kH * kW] x [outH * outW]
+    cols = F.unfold(input, kernel_size, dilation=dilation, padding=padding, stride=stride)
+    cols = cols.view(cols.size(0), cols.size(1), cols.size(2), 1).permute(0, 2, 3, 1)
+ 
+    out = torch.matmul(cols, weight.view(outH * outW, outC, inC * kH * kW).permute(0, 2, 1))
+    out = out.view(cols.size(0), outH, outW, outC).permute(0, 3, 1, 2)
+ 
+    if bias is not None:
+        out = out + bias.expand_as(out)
+    return out
+  
 class CheXNet(nn.Module):
     def __init__(self, out_size, num_layers = 121, architecture = 'densenet'):
         super(CheXNet, self).__init__()
@@ -651,13 +790,16 @@ class CheXNet(nn.Module):
             num_layers_to_model = {121:torchvision.models.densenet121, 169:torchvision.models.densenet169, 201:torchvision.models.densenet201, 161:torchvision.models.densenet161}
         elif architecture=='resnet':
             num_layers_to_model = {18:torchvision.models.resnet18, 34:torchvision.models.resnet34, 50:torchvision.models.resnet50, 101:torchvision.models.resnet101, 152:torchvision.models.resnet152}
-        
+            #num_layers_to_model = {18:getMyResnet18, 34:torchvision.models.resnet34, 50:torchvision.models.resnet50, 101:torchvision.models.resnet101, 152:torchvision.models.resnet152}
+            
         self.model = num_layers_to_model[num_layers](**model_parameters)
-
+        
         self.num_ftrs = self.get_classifier().in_features
+        if configs['use_local_conv']:
+            self.num_ftrs = configs['n_channels_local_convolution']
         new_last_layer = nn.Sequential(
-            nn.Linear(self.num_ftrs, out_size),
-            nn.Sigmoid()
+            nn.Linear(self.num_ftrs, out_size)
+            #, nn.Sigmoid()
         )
         
         self._set_classifier(new_last_layer)
@@ -680,6 +822,8 @@ class CheXNet(nn.Module):
         self._set_classifier(classifier)
         #self.model.classifier = classifier
         self.modified_end_avg_pool = True
+        #if self.architecture=='resnet':
+        #    self.model.avgpool = nn.Sequential()
         
     def forward(self, x):
         if self.modified_end_avg_pool:
