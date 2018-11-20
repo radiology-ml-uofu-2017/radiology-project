@@ -6,8 +6,80 @@ from PIL import Image
 import numbers
 import torchvision.transforms as transforms
 from future.utils import raise_with_traceback
+import skimage
+from scipy.ndimage.interpolation import rotate
+from skimage.filters import rank
+from skimage.morphology import disk
+import cv2
+import torchvision
 
-class CropBiggestCenteredInscribedSquare(object):    
+class UnNormalizeNumpy(object):
+    def __init__(self, mean, std):
+        self.mean = mean
+        self.std = std
+
+    def __call__(self, tensor):
+        """
+        Args:
+            tensor (Tensor): Tensor image of size (C, H, W) to be normalized.
+        Returns:
+            Tensor: Normalized image.
+        """
+        return_tensor = np.zeros_like(tensor)
+        i = 0
+        for t, m, s in zip(tensor, self.mean, self.std):
+            return_tensor[i,...] = (t*s)+m
+            i = i + 1
+        return return_tensor
+
+class BatchUnNormalizeTensor(object):
+    def __init__(self, mean, std):
+        self.mean = mean
+        self.std = std
+
+    def __call__(self, tensor):
+        mean = torch.FloatTensor(self.mean).cuda().view([1,3,1,1])
+        std = torch.FloatTensor(self.std).cuda().view([1,3,1,1])
+        print(torch.max(tensor))
+        print(torch.min(tensor))
+        to_return = (1-((-tensor*std)+mean)) #TEMP: corrrection because input is inversed
+        if torch.max(to_return)>1.0000001:
+            print(torch.max(to_return))
+        if torch.min(to_return)<-0.0000001:
+            print(torch.min(to_return))
+        assert(torch.max(to_return)<=1.0000001 and torch.min(to_return)>=-0.0000001)
+        return to_return
+
+class BatchNormalizeTensor(object):
+    def __init__(self, mean, std):
+        self.mean = mean
+        self.std = std
+
+    def __call__(self, tensor):
+        mean = torch.FloatTensor(self.mean).cuda().view([1,3,1,1])
+        std = torch.FloatTensor(self.std).cuda().view([1,3,1,1])
+        return (tensor-mean)/std
+
+class NormalizeNumpy(object):
+    def __init__(self, mean, std):
+        self.mean = mean
+        self.std = std
+
+    def __call__(self, tensor):
+        """
+        Args:
+            tensor (Tensor): Tensor image of size (C, H, W) to be normalized.
+        Returns:
+            Tensor: Normalized image.
+        """
+        return_tensor = np.zeros_like(tensor)
+        i = 0
+        for t, m, s in zip(tensor, self.mean, self.std):
+            return_tensor[i,...] = (t-m)/s
+            i = i + 1
+        return return_tensor
+
+class CropBiggestCenteredInscribedSquare(object):
     def __init__(self):
         pass
 
@@ -26,8 +98,8 @@ class CropBiggestCenteredInscribedSquare(object):
 
     def __repr__(self):
         return self.__class__.__name__ + '()'
-      
-class Convert16BitToFloat(object):    
+
+class Convert16BitToFloat(object):
     def __init__(self):
         pass
 
@@ -39,7 +111,121 @@ class Convert16BitToFloat(object):
     def __repr__(self):
         return self.__class__.__name__ + '()'
 
-class RandomHorizontalFlipNumpy(object):    
+class RandomScaleAugmentationNumpy(object):
+    def __init__(self, scale_range):
+        self.scale_range = scale_range
+
+    def __call__(self, image):
+        chosen_scale = self.scale_range[0] + np.random.rand()*self.scale_range[1]
+        image_2 = skimage.transform.rescale(image, (chosen_scale, chosen_scale), mode = 'edge', preserve_range =True)
+        image_2 = crop_or_pad_to(image_2, image.shape)
+        return image_2.astype(float)
+
+    def __repr__(self):
+        return self.__class__.__name__ + '()'
+
+class RandomRotationAugmentationNumpy(object):
+    def __init__(self, rotation_range_degrees):
+        self.rotation_range = rotation_range_degrees
+
+    def __call__(self, image):
+        image_min = np.min(image)
+        image_max = np.max(image)
+        image = ((image - image_min)/(image_max-image_min)).astype(np.float)
+        chosen_rotation = self.rotation_range[0] + np.random.rand()*(self.rotation_range[1]-self.rotation_range[0])
+
+        image_2 = np.transpose(skimage.transform.rotate(np.transpose(image, (1,2,0)), chosen_rotation, clip = False,  preserve_range=True, cval = 1.0), (2,0,1))
+
+        image_2 = (image_2)*(image_max-image_min)+image_min
+        return image_2.astype(np.float)
+
+    def __repr__(self):
+        return self.__class__.__name__ + '()'
+
+class RandomGammaAugmentationNumpy(object):
+    def __init__(self, gamma_range):
+        self.gamma_range = gamma_range
+
+    def __call__(self, image):
+        chosen_gamma = self.gamma_range[0] + np.random.rand()*self.gamma_range[1]
+        image_min = np.min(image)
+        image_max = np.max(image)
+        image = (image - image_min)/(image_max-image_min)
+        image_2 = skimage.exposure.adjust_gamma(image, chosen_gamma)
+        image_2 = image_2*(image_max-image_min)+image_min
+        return image_2.astype(float)
+
+    def __repr__(self):
+        return self.__class__.__name__ + '()'
+
+class castTensor(object):
+
+    def __call__(self, image):
+        return torch.FloatTensor(image)
+
+    def __repr__(self):
+        return self.__class__.__name__ + '()'
+
+class HistogramEqualization(object):
+    def __init__(self, local = False, nbins = 256):
+        self.local = local
+        self.nbins = nbins
+
+    def __call__(self, img):
+        for channel in range(img.shape[0]):  # equalizing each channel
+            image_min = np.min(img[channel, :, :])
+            image_max = np.max(img[channel, :, :])
+            img[channel, :, :] = (img[channel, :, :] - image_min)/(image_max-image_min)
+            if not self.local:
+                img[channel, :, :] = skimage.exposure.equalize_hist(img[channel, :, :], nbins = self.nbins)
+
+            else:
+                a = disk(30)
+                img[channel, :, :] = (rank.equalize( img[channel, :, :], selem = a))
+            img[channel, :, :] = img[channel, :, :]*(image_max-image_min)+image_min
+        image_2 = img
+
+        return image_2
+
+    def __repr__(self):
+        return self.__class__.__name__ + '()'
+
+class ResizeNumpy():
+    def __init__(self, size):
+        if isinstance(size, numbers.Number):
+            self.size = (int(size), int(size))
+        else:
+            self.size = size
+        print(self.size)
+
+    def __call__(self, img):
+        if img.shape[0]==3:
+            return np.concatenate((np.expand_dims(cv2.resize(img[0,...], dsize=self.size), axis = 0),
+            np.expand_dims(cv2.resize(img[1,...], dsize=self.size), axis = 0),
+            np.expand_dims(cv2.resize(img[2,...], dsize=self.size), axis = 0)), axis = 0)
+        elif img.shape[0]==1:
+            return np.expand_dims(cv2.resize(img[0,...], dsize=self.size), axis = 0)
+
+
+def crop_or_pad_to(image, final_size):
+    assert(len(image.shape)==len(final_size))
+    for i in range(len(image.shape)):
+
+        padding_list = [[0,0]]*len(image.shape)
+        if (-image.shape[i] + final_size[i])%2 == 0:
+            size_to_pad = [(-image.shape[i] + final_size[i])/2]*2
+        else:
+            size_to_pad = [(-image.shape[i] + final_size[i]+1)/2 , (-image.shape[i] + final_size[i]-1)/2]
+        padding_list[i] = size_to_pad
+        padding_list = np.array(padding_list)
+        if image.shape[i]<final_size[i]:
+
+            image = skimage.util.pad(image, padding_list, mode = 'constant')
+        elif image.shape[i]>final_size[i]:
+            image = skimage.util.crop(image,-padding_list,copy = True)
+    return image
+
+class RandomHorizontalFlipNumpy(object):
     def __init__(self, p = 0.5):
         self.p = p
 
@@ -51,7 +237,7 @@ class RandomHorizontalFlipNumpy(object):
     def __repr__(self):
         return self.__class__.__name__ + '()'
 
-class ToNumpy(object):    
+class ToNumpy(object):
     def __init__(self):
         pass
 
@@ -60,7 +246,7 @@ class ToNumpy(object):
 
     def __repr__(self):
         return self.__class__.__name__ + '()'
-      
+
 def crop_center(img,sh, sw, th, tw):
     return img[:,sh:sh+th,sw:sw+tw]
 
@@ -75,13 +261,13 @@ def pad(array, padding):
         padding = padding*4
     else:
         raise_with_traceback(ValueError('padding has an invalid value in function pad. expected list or tuple of length 1, 2 or 4 or a number. received: '+str(reference_shape)))
-    
+
     result = np.zeros((array.shape[0], array.shape[1]+ padding[1]+ padding[3], array.shape[2]+ padding[0]+ padding[2]))
     result[:,padding[1]:(array.shape[1]+padding[1]), padding[0]:(array.shape[2]+padding[0])] = array
     return result
-  
+
 class RandomCropNumpy():
-  
+
     def __init__(self, size, padding=0, pad_if_needed=False):
         if isinstance(size, numbers.Number):
             self.size = (int(size), int(size))
@@ -101,7 +287,7 @@ class RandomCropNumpy():
         Returns:
             tuple: params (i, j, h, w) to be passed to ``crop`` for random crop.
         """
-        c, w, h = img.shape
+        c, h , w = img.shape
         th, tw = output_size
         if w == tw and h == th:
             return 0, 0, h, w
@@ -109,7 +295,7 @@ class RandomCropNumpy():
         i = randint(0, h - th)
         j = randint(0, w - tw)
         return i, j, th, tw
-      
+
     def __call__(self, img):
         """
         Args:
@@ -121,20 +307,20 @@ class RandomCropNumpy():
             img = pad(img, self.padding)
 
         # pad the width if needed
-        
+
         if self.pad_if_needed and img.size[0] < self.size[1]:
             img = pad(img, (int((1 + self.size[1] - img.size[0]) / 2), 0))
         # pad the height if needed
         if self.pad_if_needed and img.size[1] < self.size[0]:
             img = pad(img, (0, int((1 + self.size[0] - img.size[1]) / 2)))
-        
+
         sh, sw, th, tw = self.get_params(img, self.size)
 
         return crop_center(img,sh, sw, th, tw).copy()
-      
+
     def __repr__(self):
         return self.__class__.__name__ + '(size={0}, padding={1})'.format(self.size, self.padding)
-      
+
 class CenterCropNumpy(RandomCropNumpy):
 
     @staticmethod
@@ -148,7 +334,7 @@ class CenterCropNumpy(RandomCropNumpy):
         Returns:
             tuple: params (i, j, h, w) to be passed to ``crop`` for random crop.
         """
-        c, w, h = img.shape
+        c, h, w = img.shape
         th, tw = output_size
         if w == tw and h == th:
             return 0, 0, h, w
@@ -161,48 +347,29 @@ class CropSideCenterNumpy(RandomCropNumpy):
 
     @staticmethod
     def get_params(img, output_size):
-        """Get parameters for ``crop`` for a random crop.
-
-        Args:
-            img (PIL Image): Image to be cropped.
-            output_size (tuple): Expected output size of the crop.
-
-        Returns:
-            tuple: params (i, j, h, w) to be passed to ``crop`` for random crop.
-        """
-        c, w, h = img.shape
+        c, h, w = img.shape
         side = randint(0,1)
         j = (w)//4
         i = 0
-        
+
         return i, j, h, w//2
-      
+
 class CropOneSideNumpy(RandomCropNumpy):
 
     @staticmethod
     def get_params(img, output_size):
-        """Get parameters for ``crop`` for a random crop.
-
-        Args:
-            img (PIL Image): Image to be cropped.
-            output_size (tuple): Expected output size of the crop.
-
-        Returns:
-            tuple: params (i, j, h, w) to be passed to ``crop`` for random crop.
-        """
-        c, w, h = img.shape
+        c, h , w = img.shape
         side = randint(0,1)
         if side == 1:
             j = 0
         else:
             j = (w)//2
         i = 0
-        
         return i, j, h, w//2
-      
+
 '''
 class RandomCropNumpy(object):
-  
+
     def __init__(self, size):
         if isinstance(size, numbers.Number):
             self.size = (int(size), int(size))
@@ -211,30 +378,30 @@ class RandomCropNumpy(object):
 
     @staticmethod
     def get_params(img, output_size):
-        c, w, h = img.size()
+        c, h, w = img.size()
         th, tw = output_size
         if w == tw and h == th:
             return 0, 0, h, w
         i = randint(0, h - th)
         j = randint(0, w - tw)
         return i, j, th, tw
-      
+
     def __call__(self, img):
         sh, sw, th, tw = self.get_params(img, self.size)
         return crop_center(img,sh, sw, th, tw)
-      
+
     def __repr__(self):
         return self.__class__.__name__ + '(size={0}, padding={1})'.format(self.size, self.padding)
 '''
 
-class RandomHorizontalFlipTensor(object):    
+class RandomHorizontalFlipTensor(object):
     def __init__(self, p = 0.5):
         self.p = p
 
     def __call__(self, tensor):
         if random() < self.p:
             idx = [i for i in range(tensor.size[2]-1, -1, -1)]
-            
+
             idx = torch.LongTensor(idx)
             inverted_tensor = tensor.index_select(2, idx)
 
@@ -243,8 +410,8 @@ class RandomHorizontalFlipTensor(object):
 
     def __repr__(self):
         return self.__class__.__name__ + '()'
-      
-class ChexnetEncode(object):    
+
+class ChexnetEncode(object):
     def __init__(self, model):
         self.model = model
 
@@ -258,7 +425,7 @@ class ChexnetEncode(object):
         return [np.squeeze(np.transpose(out.data.cpu().numpy(), (0,1,2,3)),axis = 0)]
 
     def __repr__(self):
-        return self.__class__.__name__ + '()'    
+        return self.__class__.__name__ + '()'
 
 def preprocess_image(imagePath, transform):
     imageData = Image.open(imagePath)
@@ -270,8 +437,13 @@ def preprocess_image(imagePath, transform):
         return None
     '''
     return transform(imageData)
-        
+
 def preprocess_images(all_images, transformations):
     a = all_images.apply(lambda row: preprocess_image(row['filepath'], transformations),axis=1)
     all_images['preprocessed'] = a
     return all_images
+
+def preprocess_images_and_save(all_images, transformations, h5f):
+    for index, row in all_images.iterrows():
+        h5f['dataset_1'][index,...] = preprocess_image(row['filepath'], transformations)
+    return h5f

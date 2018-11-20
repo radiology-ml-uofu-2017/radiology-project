@@ -195,10 +195,8 @@ def report_final_results(y_corr , y_pred, y_corr_all, train):
                                                                         get_gold(absolutes_and_important_ratios_plot_calc(y_pred, y_corr_all, 'fev1_ratio'), 
                                                                                  absolutes_and_important_ratios_plot_calc(y_pred, y_corr_all, 'fev1fvc_predrug')))
     if len(configs['get_labels_columns_gold'])>0:
-        print(configs['get_labels_columns_gold'])
-        accuracies['confusion_gold'] = sklearn.metrics.confusion_matrix(get_gold(absolutes_and_important_ratios_plot_calc(y_corr, y_corr_all, 'fev1_ratio'), 
-                                                                                 absolutes_and_important_ratios_plot_calc(y_corr, y_corr_all, 'fev1fvc_predrug')), 
-                                                                        absolutes_and_important_ratios_plot_calc(y_pred, y_corr_all, 'gold'))
+        accuracies['confusion_gold'] = sklearn.metrics.confusion_matrix(absolutes_and_important_ratios_plot_calc(y_corr, y_corr_all, 'gold'), 
+                                                                        np.clip(np.rint(absolutes_and_important_ratios_plot_calc(y_pred, y_corr_all, 'gold')), a_min = 0, a_max = 5))
     for k in range(len(output_variables)):
         name = output_variables[k]
         this_y_corr = absolutes_and_important_ratios_plot_calc(y_corr, y_corr_all, name)

@@ -1,7 +1,7 @@
 from future.utils import raise_with_traceback
 import logging
 import time
-import socket 
+import socket
 from future.utils import iteritems
 import torch.nn as nn
 from random import randint
@@ -15,22 +15,22 @@ class ConfigsClass(object):
         self.configs_get_values_frozen = True
         self.configs_add_variables_frozen = False
         self.has_args = {}
-        
+
     def __getitem__(self, name):
         if self.configs_get_values_frozen:
             raise_with_traceback(ValueError('Variables cannot be used yet because they were not freed'))
         return self.get_variable(name)
-    
+
     def __setitem__(self, key, item):
         if self.configs_set_values_frozen:
             raise_with_traceback(ValueError('Variables cannot be changed anymore because they were frozen'))
         if key not in list(self.configs.keys()):
             raise_with_traceback(ValueError('Variable ' + name + 'was not added to configs'))
         self.set_variable(key, item)
-        
+
     def freeze_configs_keys(self):
         self.configs_add_variables_frozen = True
-        
+
     def add_variable(self, name, default, has_args = False):
         if self.configs_add_variables_frozen:
             raise_with_traceback(ValueError('Variables cannot be added anymore because they were frozen'))
@@ -38,14 +38,14 @@ class ConfigsClass(object):
             raise_with_traceback(ValueError('Variable ' + name + 'was already added before'))
         self.has_args[name] = has_args
         self.set_variable(name, default)
-    
+
     def set_variable(self, name, value):
         if callable(value):
             var_as_func = value
         else:
             var_as_func = lambda self: value
         self.configs[name] = partial(var_as_func, self=self)
-        
+
     def get_variable(self, name):
         return (self.configs[name]) if self.has_args[name] else (self.configs[name])()
 
@@ -54,25 +54,25 @@ class ConfigsClass(object):
         for key, value in sorted(iteritems(self.configs)):
             logging.info(key + ': ' + str(self.get_variable(key)).replace('\n', ' ').replace('\r', ''))
         logging.info('-----------------------------end used configs-----------------------------')
-        
+
     def add_predefined_set_of_configs(self,name, dict_configs):
-        if not set(dict_configs.keys()).issubset(self.configs.keys()): 
+        if not set(dict_configs.keys()).issubset(self.configs.keys()):
             raise_with_traceback(ValueError('At least one variable in given dict is not present in the configs:' + str(set(dict_configs.keys()).difference(self.configs.keys()))))
         self.predefined[name] = dict_configs
-        
+
     def load_predefined_set_of_configs(self, name):
         for key, value in iteritems(self.predefined[name]):
             self.set_variable(key, value)
-    
+
     def add_self_referenced_variable_from_dict(self,new_variable_name, referenced_variable_name, dict_returns):
         def a(self):
             return dict_returns[self[referenced_variable_name]]
         self.add_variable(new_variable_name,a)
-    
+
     def open_get_block_set(self):
         self.configs_set_values_frozen = True
         self.configs_get_values_frozen = False
-    
+
 timestamp = time.strftime("%Y%m%d-%H%M%S")+ '-' + str(randint(1000, 9999))
 
 configs = ConfigsClass()
@@ -96,7 +96,7 @@ configs.add_variable('exponent_relative_error_mse_loss', 1)
 configs.add_variable('individual_kind_of_loss', {'copd':'bce'})
 configs.add_variable('individual_loss_weights', {'copd':0.33})
 configs.add_variable('loss_weight', 1.0)
-configs.add_variable('positions_to_use', ['PA']) # set of 'PA', 'AP' in a list 
+configs.add_variable('positions_to_use', ['PA']) # set of 'PA', 'AP' in a list
 configs.add_variable('initial_lr_fc', 0.00001)
 configs.add_variable('initial_lr_cnn', 0.00001)
 configs.add_variable('initial_lr_location', 0.0001)
@@ -161,13 +161,34 @@ configs.add_variable('milestones_steps', [35,45])
 configs.add_variable('scheduler_to_use', 'plateau')
 configs.add_variable('first_parameter_cnn_not_to_freeze', 'conv1')
 configs.add_variable('override_max_axis_graph', None)
+configs.add_variable('relative_noise_to_add_to_label',None)
+configs.add_variable('use_horizontal_flip',False)
+configs.add_variable('gamma_range_augmentation',None)
+configs.add_variable('degree_range_augmentation',None)
+configs.add_variable('scale_range_augmentation',None)
+configs.add_variable('histogram_equalization','none') #'none', 'global', 'local'
+configs.add_variable('use_delayed_lateral_pooling',False)
+configs.add_variable('use_unet_segmentation',False)
+configs.add_variable('use_unet_segmentation_for_lateral',False)
+configs.add_variable('initial_lr_unet', 0.0)
+configs.add_variable('l2_reg_unet', 0.0)
+configs.add_variable('unet_multiply_instead_of_channel', False)
+configs.add_variable('unet_model_file', 'unet-epoch100-20181012-011958-7421')
+configs.add_variable('normalization_segmentation', False)
+configs.add_variable('register_with_segmentation', False)
+configs.add_variable('extra_histogram_equalization_for_segmentation', True)
+configs.add_variable('vgg_batch_norm', False)
+configs.add_variable('squeezenet_version_11', True)
+configs.add_variable('magnification_input', 1)
+configs.add_variable('use_half_lung', False)
+configs.add_variable('segmentation_in_loading', True)
 
 #These are the main configs to change from default
 configs.add_variable('trainable_densenet', False)
 configs.add_variable('use_conv11', False)
 configs.add_variable('labels_to_use', 'only_absolute') # 'two_ratios', 'three_absolute', 'all_nine',
-                                                       #'only_absolute','none', 'fev1fvc_predrug_absolute', 
-                                                       #'predict_diffs', 'fev1_ratio', 'fvcfev1_predrug'
+                                                       #'only_absolute','none', 'fev1fvc_predrug_absolute',
+                                                       #'predict_diffs', 'fev1_ratio', 'fev1fvc_predrug'
 configs.add_variable('use_lateral', False)
 configs.add_variable('tie_cnns_same_weights', False)
 configs.add_variable('tie_conv11_same_weights', False)
@@ -189,11 +210,11 @@ configs.add_variable('l2_reg_cnn', 0.0)
 configs.add_variable('l2_reg_location', 0.0)
 
 configs.add_variable('use_sigmoid_safety_constants',False)
-configs.add_variable('sigmoid_safety_constant', 
-                     {'fvc_pred':[0.5,1.15], 
-                   'fev1_pred':[0.45,1.15], 
-                   'fev1fvc_pred':[0.96,1.02], 
-                   'fev1_predrug':[0.75,1.15], 
+configs.add_variable('sigmoid_safety_constant',
+                     {'fvc_pred':[0.5,1.15],
+                   'fev1_pred':[0.45,1.15],
+                   'fev1fvc_pred':[0.96,1.02],
+                   'fev1_predrug':[0.75,1.15],
                    'fev1fvc_predrug':[0.75,1.02],
                    'fev1_ratio':[0.65, 1.25],
                    'fvc_predrug':[0.45, 1.25],
@@ -201,9 +222,9 @@ configs.add_variable('sigmoid_safety_constant',
                    'fev1fvc_ratio':[0.75, 1.15],
                    'copd':[1.0,1.0]}
                     )
-                     
-configs.add_variable('columns_translations',                      
-                     {"Subject_Global_ID": "subjectid", 
+
+configs.add_variable('columns_translations',
+                     {"Subject_Global_ID": "subjectid",
                         "CRStudy_Local_ID": "crstudy",
                         "PFTExam_Local_ID": "pftid",
                         'Predicted FVC':'fvc_pred',
@@ -225,7 +246,7 @@ configs.add_variable('columns_translations',
                         'TOBACCO_STATUS':'tobacco_status',
                         'SMOKING_TOBACCO_STATUS':'smoking_tobacco_status',
                         'LUNG_TRANSPLANT':'lung_transplant'})
-                     
+
 configs.add_variable('all_input_columns',lambda self: list(self['columns_translations'].values()))
 configs.add_variable('all_output_columns',['fvc_pred',
                         'fev1_pred',
@@ -235,10 +256,10 @@ configs.add_variable('all_output_columns',['fvc_pred',
                         'fev1fvc_predrug',
                         'fvc_ratio',
                         'fev1_ratio',
-                        'fev1fvc_ratio',                       
+                        'fev1fvc_ratio',
                         'copd',
                         'fev1_diff',
-                        'fvc_diff', 
+                        'fvc_diff',
                         'gold'])
 
 
@@ -254,41 +275,50 @@ configs.add_variable('get_individual_loss_weights',lambda self: get_individual_l
 
 # defining all variables that the network should output
 configs.add_self_referenced_variable_from_dict('get_labels_columns_pft', 'labels_to_use',
-                                      {'two_ratios': ['fev1fvc_predrug','fev1_ratio'], 
-                                       'three_absolute':['fev1_predrug','fvc_predrug', 'fev1_pred'], 
+                                      {'two_ratios': ['fev1fvc_predrug','fev1_ratio'],
+                                       'three_absolute':['fev1_predrug','fvc_predrug', 'fev1_pred'],
                                        'all_nine':['fvc_pred','fev1_pred','fev1fvc_pred','fvc_predrug','fev1_predrug','fev1fvc_predrug','fvc_ratio','fev1_ratio','fev1fvc_ratio'],
-                                       'only_absolute':['fev1_predrug','fvc_predrug', 'fev1_pred', 'fvc_pred'], 
-                                       'fev1fvc_predrug_absolute':['fev1_predrug','fvc_predrug'], 
-                                       'predict_diffs':['fev1_diff','fvc_diff'], 
-                                       'two_predrug_absolute':['fev1_predrug','fvc_predrug'], 
+                                       'only_absolute':['fev1_predrug','fvc_predrug', 'fev1_pred', 'fvc_pred'],
+                                       'fev1fvc_predrug_absolute':['fev1_predrug','fvc_predrug'],
+                                       'predict_diffs':['fev1_diff','fvc_diff'],
+                                       'two_predrug_absolute':['fev1_predrug','fvc_predrug'],
                                        'fev1fvc_predrug':['fev1fvc_predrug'],
                                        'fev1_ratio':['fev1_ratio'],
-                                       'none':[]}) 
-                                      
+                                       'none':[]})
+
+configs.add_self_referenced_variable_from_dict('avg_pool_kernel_size', 'chexnet_architecture',
+                                      {'densenet': 7,
+                                       'resnet':7,
+                                       'vgg': 7,
+                                       'inception':8,
+                                       'squeezenet': 13 ,
+                                       'alexnet': 6
+                                       })
+
 configs.add_self_referenced_variable_from_dict('get_labels_columns_copd', 'output_copd',
-                                      {True: ['copd'], False: []}) 
+                                      {True: ['copd'], False: []})
 
 configs.add_self_referenced_variable_from_dict('get_labels_columns_gold', 'output_gold',
-                                      {True: ['gold'], False: []}) 
+                                      {True: ['gold'], False: []})
 
 configs.add_variable('get_labels_columns',lambda self: self['get_labels_columns_pft'] + self['get_labels_columns_copd']+ self['get_labels_columns_gold'])
 
 configs.add_self_referenced_variable_from_dict('pft_plot_columns', 'labels_to_use',
-                                      {'two_ratios': [['fev1fvc_predrug'],['fev1_ratio']], 
-                                       'three_absolute':[['fev1_predrug','fvc_predrug', 'fev1_pred'],['fev1fvc_predrug'],['fev1_ratio']], 
+                                      {'two_ratios': [['fev1fvc_predrug'],['fev1_ratio']],
+                                       'three_absolute':[['fev1_predrug','fvc_predrug', 'fev1_pred'],['fev1fvc_predrug'],['fev1_ratio']],
                                        'all_nine':[['fvc_pred','fev1_pred','fev1fvc_pred','fvc_predrug','fev1_predrug','fev1fvc_predrug','fvc_ratio','fev1_ratio','fev1fvc_ratio']],
-                                       'only_absolute':[['fev1_predrug','fvc_predrug', 'fev1_pred', 'fvc_pred'], ['fev1fvc_predrug'],['fev1_ratio']], 
-                                       'fev1fvc_predrug_absolute':[['fev1_predrug','fvc_predrug'], ['fev1fvc_predrug']], 
-                                       'predict_diffs':[['fev1_diff','fvc_diff'], ['fev1fvc_predrug'], ['fev1_ratio']], 
+                                       'only_absolute':[['fev1_predrug','fvc_predrug', 'fev1_pred', 'fvc_pred'], ['fev1fvc_predrug'],['fev1_ratio']],
+                                       'fev1fvc_predrug_absolute':[['fev1_predrug','fvc_predrug'], ['fev1fvc_predrug']],
+                                       'predict_diffs':[['fev1_diff','fvc_diff'], ['fev1fvc_predrug'], ['fev1_ratio']],
                                        'two_predrug_absolute':[['fev1_predrug','fvc_predrug'], ['fev1fvc_predrug'], ['fev1_ratio']],
                                        'fev1fvc_predrug':[['fev1fvc_predrug']],
                                        'fev1_ratio':[['fev1_ratio']],
                                        'none':[]})
-                                      
+
 configs.add_variable('pre_transform_labels', PreTransformLabels(configs))
 
 
-configs.add_predefined_set_of_configs('densenet', { 'trainable_densenet':True, 
+configs.add_predefined_set_of_configs('densenet', { 'trainable_densenet':True,
                                            'remove_pre_avg_pool':False,
                                              'use_dropout_hidden_layers':0.25})
 
@@ -350,9 +380,9 @@ configs.add_predefined_set_of_configs('meanvar_loss', {'use_mean_var_loss': True
                                                 ,'BATCH_SIZE': 64})
 
 configs.add_self_referenced_variable_from_dict('get_available_memory', 'machine_to_use',
-                                      {'dgx': 15600-550-10, 
-                                       'titan':11700-2978,#11700-550-10, 
-                                       'other':9000-2*550-600}) 
+                                      {'dgx': 15600-550-10,
+                                       'titan':11700-2978,#11700-550-10,
+                                       'other':9000-2*550-600})
 def get_batch_size(self):
     if self['trainable_densenet']:
         return int(self['get_available_memory']/140./(2. if self['use_lateral'] else 1))
@@ -371,14 +401,14 @@ def get_individual_output_kind(self):
 
 def get_individual_pre_transformation(self):
     return get_individual_characteristic('individual_pre_transformation', 'pre_transformation', self)
-  
+
 def get_individual_loss_weights(self):
     return get_individual_characteristic('individual_loss_weights', 'loss_weight', self)
 
 
 configs.add_predefined_set_of_configs('frozen_densenet', {})
 
-configs.add_predefined_set_of_configs('copd_only', {'kind_of_loss':'bce', 
+configs.add_predefined_set_of_configs('copd_only', {'kind_of_loss':'bce',
                                                           'labels_to_use':'none',
                                                           'network_output_kind':'sigmoid',
                                                           'output_copd':True})
