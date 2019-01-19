@@ -13,6 +13,8 @@ import os
 import time
 import argparse
 import math
+import h5py
+import socket
 
 sys.path.append(os.getcwd())
 
@@ -51,6 +53,12 @@ parser = argparse.ArgumentParser()
 parser.add_argument('-c','--cvd', required=False)
 parser.add_argument('-d','--dd_test', required=False)
 parser.add_argument('-m','--model_to_load', required=False)
+
+##needed for use together with GAN parser
+parser.add_argument('-cuda','--cuda', action='store_true')
+parser.add_argument('-exp','--exp', required=False)
+parser.add_argument('-dit', '--d_iters', type=int, default=5)
+
 args = vars(parser.parse_args())
 
 configs.load_predefined_set_of_configs('cnn20180628') #'densenet', 'frozen_densenet', 'p1', 'fc20180524', 'cnn20180628'
@@ -63,7 +71,7 @@ configs.load_predefined_set_of_configs('resnet18')
 #configs.load_predefined_set_of_configs('meanvar_loss')
 
 #configs['output_copd'] = True
-#configs['labels_to_use'] = 'fev1_ratio'
+#configs['labels_to_use'] = 'fev1fvc_predrug' #'fev1_ratio'
 #configs['use_copd_definition_as_label'] = True
 #configs['positions_to_use']= ['PA']
 
@@ -78,10 +86,11 @@ configs.load_predefined_set_of_configs('resnet18')
 
 #configs['load_image_features_from_file'] = False
 configs['data_to_use']  = ['2012-2016', '2017']
-#configs['BATCH_SIZE']=20
-configs['BATCH_SIZE']=13
+configs['BATCH_SIZE']=20
+#configs['BATCH_SIZE']=13
 #configs['BATCH_SIZE']=8
 #configs['BATCH_SIZE']=5
+#configs['BATCH_SIZE']=2
 #configs['densenet_dropout'] = 0.0
 #configs['use_dropout_hidden_layers'] = 0.0
 configs['pretrain_kind']  = 'imagenet'
@@ -106,12 +115,12 @@ configs['remove_repeated_images'] = True
 configs['remove_cases_more_one_image_per_position'] = True
 #configs['scheduler_to_use'] = 'steps'
 #configs['save_model']=True
-#configs['load_model']=True
-#configs['skip_train']=True
-#configs['N_EPOCHS'] = 1
-#configs['prefix_model_to_load']='_'
+# configs['load_model']=True
+# configs['skip_train']=True
+# configs['N_EPOCHS'] = 1
+# configs['prefix_model_to_load']='_'
 configs['splits_to_use'] = 'test_with_val'
-#configs['splits_to_use'] = 'test_with_test'
+# configs['splits_to_use'] = 'test_with_test'
 #configs['use_sigmoid_channel']=True
 configs['model_to_load'] = '20180921-151934-5939'
 if args['model_to_load'] is not None:
@@ -120,15 +129,35 @@ configs['override_max_axis_graph'] = 1.5
 #configs['relative_noise_to_add_to_label'] = 0.3
 configs['use_horizontal_flip'] = True
 #configs['use_random_crops'] = False
-configs['use_unet_segmentation']  = True
+#configs['use_unet_segmentation']  = True
+#configs['calculate_segmentation_features'] = True
 #configs['use_unet_segmentation_for_lateral'] = True
 #configs['initial_lr_unet'] = 0.0001
 #configs['unet_multiply_instead_of_channel'] = True
 #configs['gamma_range_augmentation'] = [0.8,1.2]
 #configs['degree_range_augmentation'] = [-5,5]
 #configs['scale_range_augmentation'] = [0.9,1.1]
-#configs['histogram_equalization']  ='global' #'none', 'global', 'local'
-configs['register_with_segmentation'] = True
+configs['histogram_equalization']  ='none' #'none', 'global', 'local'
+#configs['register_with_segmentation'] = True
+# configs['normalize_lateral_and_frontal_with_bn'] = True
+#configs['normalize_extra_inputs_and_rest_with_bn'] = True
+#configs['extra_fc_layers_for_extra_input'] = True
+#configs['use_log_quotient_output'] = True
+#configs['use_binary_classifiers'] = True
+# configs['kind_of_loss'] = 'l2'
+# configs['use_dropout_hidden_layers'] = 0.0
+# configs['dropout_batch_normalization_last_layer'] = False
+#configs['network_output_kind']  = 'linear'
+#configs['plateau_patience'] = 25
+#configs['N_EPOCHS'] = 500
+
+
+# configs['create_csv_for_segmentation_features'] = True
+# configs['use_precalculated_segmentation_features'] = False
+# configs['prevent_train_shuffle']  = True
+# configs['BATCH_SIZE']=1
+# configs['use_random_crops'] = False
+# configs['use_horizontal_flip'] = False
 
 #configs['create_csv_from_dataset'] = True
 #configs['output_gold'] = True
@@ -150,24 +179,42 @@ configs['register_with_segmentation'] = True
 #configs['initial_lr_cnn'] = 0.001
 
 #configs['chexnet_architecture'] =  'resnet'
-configs['chexnet_layers'] = 50
-configs['CKPT_PATH']  = 'model_chestxray14_resnet_50.t7'
+#configs['chexnet_layers'] = 50
+#configs['CKPT_PATH']  = 'model_chestxray14_resnet_50.t7'
 #configs['chexnet_layers'] = 101
 #configs['CKPT_PATH']  = 'model_chestxray14_resnet_101.t7'
 # configs['chexnet_architecture'] = 'vgg'
 # configs['chexnet_layers']  =  19
 # configs['vgg_batch_norm'] = True
-# configs['remove_pre_avg_pool'] = True
-configs['use_random_crops'] = False
+#configs['remove_pre_avg_pool'] = True
+#configs['use_random_crops'] = False
 
 # configs['positions_to_use'] = ['LAT']
-# configs['use_lateral'] = False
+#configs['use_lateral'] = False
 
-#configs['magnification_input'] = 1/7.
+configs['magnification_input'] = 1#1/7.
 #configs['scheduler_to_use'] = 'cosine'
 #configs['channels_hidden_layers'] = 1024
 #configs['use_dropout_hidden_layers'] = 0.0
 # configs['use_half_lung'] = True
+
+#for gan visualization
+# configs['use_lateral'] = False
+# configs['use_horizontal_flip'] = False
+# configs['use_random_crops'] = True
+# configs['histogram_equalization']  ='none'
+# configs['use_extra_inputs'] = False
+# #configs['save_model']=True
+# #configs['register_with_segmentation'] = True
+# #configs['segmentation_in_loading'] = True
+# #configs['use_precalculated_segmentation_features'] = False
+# configs['model_to_load'] = '20181218-174629-1766'
+# configs['prefix_model_to_load'] = '_'
+# #configs['load_model']=True
+# #configs['kind_of_loss'] = 'smoothl1'
+# ##configs['BATCH_SIZE'] = 32
+# #configs['output_copd']=True
+# configs['individual_output_kind'] = {'copd':'linear'}
 
 configs.open_get_block_set()
 
@@ -190,9 +237,7 @@ NUM_WORKERS = 0
 # faster to have one worker and use non thread safe h5py to load preprocessed images
 # than other tested options
 
-
-
-if configs['machine_to_use'] == 'titan' or args['cvd'] is not None:
+if (not socket.gethostname() == 'rigveda') and (configs['machine_to_use'] == 'titan' or args['cvd'] is not None):
     if args['cvd'] is None:
         raise_with_traceback(ValueError('You should set Cuda Visible Devices (-c or --cvd) when using titan'))
     os.environ['CUDA_VISIBLE_DEVICES'] = args['cvd']
@@ -208,12 +253,6 @@ def meanvar_var_loss_calc(output_var, interm_probs_logits, model):
         else:
             nonlinearity = nn.Softmax().cuda()
         losses.append(torch.mean(torch.sum(nonlinearity(interm_probs_logits[k])*(output_var[:,k].unsqueeze(1).expand(size0, size1) - bins[k].expand(size0, size1))**2, dim = 1), dim = 0) )
-    return sum(losses) #sum?
-
-def meanvar_average_loss_calc(output_var, target_var):
-    losses = []
-    for k in range(target_var.size()[1]):
-        losses.append(nn.MSELoss(size_average = True).cuda()(output_var[:,k], target_var[:,k]))
     return sum(losses) #sum?
 
 def round_with_chosen_spacing(tensor, spacing):
@@ -236,7 +275,7 @@ def meanvar_bce_loss_calc(interm_probs_logits, target_var, model, write):
         size0 = rounded_targets.size()[0]
         size1 = bins[k].size()[1]
         int_targets = (torch.round((rounded_targets - torch.min(bins[k]).expand(size0))/spacing)).long()
-        one_hot_targets = torch.autograd.Variable(torch_one_hot(int_targets.data.cpu(), size1).cuda(async=True, device = 0), requires_grad=False)
+        one_hot_targets = torch.autograd.Variable(torch_one_hot(int_targets.data.cpu(), size1).cuda(non_blocking=True, device = 0), requires_grad=False)
         #outputs with larger range are impacting more in the loss here, maybe not reduce and then average
         losses.append(nn.CrossEntropyLoss(size_average = True).cuda()(interm_probs_logits[k], int_targets))
         if write:
@@ -245,6 +284,32 @@ def meanvar_bce_loss_calc(interm_probs_logits, target_var, model, write):
             np.savetxt('one_hot_targetsmean'+str(k)+'.csv', one_hot_targets.data.cpu().numpy(), delimiter=',')
     if write:
         print(sum(losses))
+    return sum(losses) #sum?
+
+def binary_classifiers_bce_loss_calc(interm_probs_logits, target_var, model, train_loader):
+    assert(len(interm_probs_logits)==target_var.size()[1])
+    losses = []
+    bins = model.module.final_layers.final_linear.bins_list
+    #for k in range(target_var.size()[1]):
+    for k, col_name in enumerate(configs['get_labels_columns']):
+        int_targets = (target_var[:,k].unsqueeze(1)>bins[k]).float()
+        count_less_than = torch.sum(torch.tensor(np.expand_dims(train_loader.dataset.listImage[0][col_name], axis = 1)).cuda().float()<bins[k], dim = 0).float().cuda()
+        count_all = (train_loader.dataset.listImage[0][col_name].shape[0])
+        weights = (1-int_targets)+(2*int_targets-1)*count_less_than*1.0/count_all
+        if configs['binary_classifiers_use_weights']:
+            losses.append(nn.BCEWithLogitsLoss(size_average = True, weight = weights).cuda()(interm_probs_logits[k], int_targets))
+        else:
+            losses.append(nn.BCEWithLogitsLoss(size_average = True).cuda()(interm_probs_logits[k], int_targets))
+        #print(nn.Sigmoid()(interm_probs_logits[k][0]))
+    return sum(losses) #sum?
+
+def binary_classifiers_consistency_loss_calc(interm_probs_logits):
+    
+    losses = torch.zeros(interm_probs_logits[0].size(0)).cuda()
+    for k, col_name in enumerate(configs['get_labels_columns']):
+        x = nn.Sigmoid()(interm_probs_logits[k])
+        for i in range(x.size(1)-1, 0, -1):
+            losses += x[:,i]*torch.sum(1-x[:,:i], dim = 1)
     return sum(losses) #sum?
 
 def mutual_exclusivity_loss(ws):
@@ -304,35 +369,36 @@ def run_epoch(loaders, model, criterion, optimizer, epoch=0, n_epochs=0, train=T
     lossValNorm = 0.0
     y_corr, y_pred, y_corr_all = (np.empty([0,x]) for x in (len(labels_columns),len(labels_columns),len(configs['all_output_columns'])))
 
-    for i, (input1, input2, target, column_values, extra_inputs, filepath) in enumerate(loaders):
+    for i, (input1, input2, target, column_values, extra_inputs, filepath, segmentation_features, index ) in enumerate(loaders):
         if train:
             optimizer.zero_grad()
         # Forward pass
-        input1_var, input2_var, extra_inputs_var, target_var = ((torch.autograd.Variable(var.cuda(async=True, device = 0), volatile=(not train))
-                                               if (not isinstance(var,(list,))) else None) for var in (input1, input2, extra_inputs,target))
+        input1_var, input2_var, extra_inputs_var, target_var = ((torch.autograd.Variable(var.cuda(non_blocking=True, device = 0), volatile=(not train))
+                                               if (not isinstance(var,(list,))) else None) for var in (input1, input2, extra_inputs,target)) #TEMP: replace segmentation_features with extra_inputs
+        
         output_var, extra_outs = model(input1_var, input2_var, extra_inputs_var, epoch)
-        interm_probs_logits = extra_outs['logits']
-        averages = extra_outs['averages']
-        ws = extra_outs['ws']
-        vs = extra_outs['vs']
-        spatial_outputs = extra_outs['spatial_outputs']
+
+        interm_probs_logits = extra_outs.get('logits')
+        averages = extra_outs.get('averages')
+        grad_to_improve = extra_outs.get('grad_to_improve')
+        ws = extra_outs.get('ws')
+        vs = extra_outs.get('vs')
+        spatial_outputs = extra_outs.get('spatial_outputs')
+
         '''
         print(train)
         print(i)
         entropy_loss = metrics.get_last_layer_entropy(spatial_outputs)**2
         '''
-        if not configs['use_mean_var_loss']:
-            losses = []
-
-            for k in range(target.size()[1]):
-                losses.append(criterion[k]['weight']*criterion[k]['loss'](output_var[:,k], target_var[:,k]))
-            loss = sum(losses)#just like the comment above: should it be the average here? I probably need to choose a different learning rate for common and non-common variables between outputs  /float(len(losses))
-        else:
+        losses = []
+        for k in range(target.size()[1]):
+            losses.append(criterion[k]['weight']*criterion[k]['loss'](output_var[:,k], target_var[:,k]))
+        loss = sum(losses)#just like the comment above: should it be the average here? I probably need to choose a different learning rate for common and non-common variables between outputs  /float(len(losses))
+        if configs['use_mean_var_loss']:
             write = (i==0 and epoch==50) and train and False
             meanvar_var_loss = meanvar_var_loss_calc(averages, interm_probs_logits, model)
             meanvar_bce_loss = meanvar_bce_loss_calc(interm_probs_logits, target_var, model, write)
-            meanvar_average_loss = meanvar_average_loss_calc(averages, target_var)
-            loss = configs['multiplier_constant_meanvar_mean_loss']*meanvar_average_loss + configs['multiplier_constant_meanvar_var_loss']*meanvar_var_loss + configs['multiplier_constant_meanvar_bce_loss']*meanvar_bce_loss
+            loss = configs['multiplier_constant_meanvar_mean_loss']*loss + configs['multiplier_constant_meanvar_var_loss']*meanvar_var_loss + configs['multiplier_constant_meanvar_bce_loss']*meanvar_bce_loss
 
             if write:
                 np.savetxt('output_varmean.csv', output_var.data.cpu().numpy(), delimiter=',')
@@ -342,6 +408,16 @@ def run_epoch(loaders, model, criterion, optimizer, epoch=0, n_epochs=0, train=T
                 bins = model.module.final_layers.final_linear.bins_list
                 for k in range(target.size()[1]):
                     print(bins[k])
+        if configs['use_binary_classifiers']:
+            meanvar_bce_loss = binary_classifiers_bce_loss_calc(interm_probs_logits, target_var, model, loaders)
+            mean_loss = configs['multiplier_constant_binary_classifiers_mean_loss']*loss 
+            if configs['multiplier_constant_binary_classifiers_consistency_loss']>0:
+                consistency_loss = configs['multiplier_constant_binary_classifiers_consistency_loss']*binary_classifiers_consistency_loss_calc(interm_probs_logits)
+            else:
+                consistency_loss = 0
+            loss= configs['multiplier_constant_binary_classifiers_bce_loss']*meanvar_bce_loss + consistency_loss
+            #if epoch>10:
+            loss += mean_loss 
         output_var_fixed = output_var.data.cpu().numpy()
         target_var_fixed = target.numpy()
         all_target_var_fixed = column_values.numpy()
@@ -360,6 +436,21 @@ def run_epoch(loaders, model, criterion, optimizer, epoch=0, n_epochs=0, train=T
             print(orthogonality_loss(vs))
             print(loss)
             loss =loss + configs['mutual_exclusivity_loss_multiplier']*mutual_exclusivity_loss(ws) + configs['gate_uniformity_loss_multiplier']*gate_uniformity_loss(ws) +  configs['gate_orthogonal_loss_multiplier']*orthogonality_loss(vs) #+ entropy_loss
+        if configs['use_log_quotient_output']:
+
+            norm = torch.norm(grad_to_improve, dim = 1).unsqueeze(1)
+            inv_idx = torch.tensor([1, 0]).cuda().long()
+
+            perpendicular = grad_to_improve.index_select(1, inv_idx)*torch.tensor([-1, 0]).cuda().float().view(1,2,1)
+            direction = (perpendicular)/torch.norm(perpendicular, dim = 1).unsqueeze(1)
+            direction[direction != direction] = 0
+            distance = output_var-target_var
+            desired_distance = 0.02
+            #distance = torch.clamp(distance, min = 0, max = 0.2)
+            #orientation = torch.clamp(-(distance**2-desired_distance**2)/(distance**2+desired_distance**2), min = 0, max = 1.0).unsqueeze(1)
+            orientation = (-(distance**2-desired_distance**2)/(distance**2+desired_distance**2)).unsqueeze(1)
+            #print(orientation)
+            loss += torch.mean(norm*orientation*direction)
         y_corr, y_pred, y_corr_all = (np.concatenate(x, axis = 0) for x in ((y_corr, target_var_fixed), (y_pred, output_var_fixed), (y_corr_all, all_target_var_fixed)))
 
 
@@ -416,8 +507,8 @@ def get_loader(set_of_images, cases_to_use, all_labels, transformSequence, split
 
         if verbose:
             logging.info('size ' + split + ' ' + str(i) +': '+str(np.array(cases_to_use_on_set_of_images[i]).shape[0]))
-    t_dataset = inputs.DatasetGenerator(cases_to_use_on_set_of_images, transformSequence, train = (split=='train'))
-    if split == 'train':
+    t_dataset = inputs.DatasetGenerator(cases_to_use_on_set_of_images, transformSequence, train = (split=='train'), segmentation_features_file = configs['local_directory'] + '/segmentation_features_'+split+'.h5')
+    if split == 'train' and not configs['prevent_train_shuffle']:
       if configs['balance_dataset_by_fvcfev1_predrug']:
           column_to_use = cases_to_use_on_set_of_images[0]['fev1fvc_predrug']
           kde = KernelDensity(kernel='gaussian', bandwidth=0.02).fit(np.expand_dims(column_to_use, axis = 1))
@@ -450,12 +541,13 @@ def load_training_pipeline(cases_to_use, all_images, all_labels, trainTransformS
     train_loaders = []
     test_loaders = []
     eval_train_loaders = []
-
-    configs.add_self_referenced_variable_from_dict('get_training_range', 'training_pipeline',
-                                          {'one_vs_all':cases_to_use['subjectid'].unique(),
-                                           'simple': range(1),
-                                           'ensemble': range(configs['total_ensemble_models'])})
-
+    try:
+        configs.add_self_referenced_variable_from_dict('get_training_range', 'training_pipeline',
+                                              {'one_vs_all':cases_to_use['subjectid'].unique(),
+                                               'simple': range(1),
+                                               'ensemble': range(configs['total_ensemble_models'])})
+    except ValueError:
+        pass
     training_range = configs['get_training_range']
 
     for i in training_range:
@@ -480,19 +572,19 @@ def load_training_pipeline(cases_to_use, all_images, all_labels, trainTransformS
 
             if configs['use_fixed_test_set']:
                 try:
-                    with open('./testsubjectids.pkl') as f:
+                    with open(configs['local_directory'] + '/testsubjectids.pkl') as f:
                         testids = pickle.load(f)
 
                 except TypeError:
-                    with open('./testsubjectids.pkl', 'rb') as f:
+                    with open(configs['local_directory'] + '/testsubjectids.pkl', 'rb') as f:
                         testids = pickle.load(f, encoding='latin1')
 
                 try:
-                    with open('./validationsubjectids.pkl') as f:
+                    with open(configs['local_directory'] + '/validationsubjectids.pkl') as f:
                         valids = pickle.load(f)
 
                 except TypeError:
-                    with open('./validationsubjectids.pkl', 'rb') as f:
+                    with open(configs['local_directory'] + '/validationsubjectids.pkl', 'rb') as f:
                         valids = pickle.load(f, encoding='latin1')
 
             else:
@@ -555,8 +647,22 @@ def load_training_pipeline(cases_to_use, all_images, all_labels, trainTransformS
             test_loader = get_loader(all_images, val_images, test_labels, testTransformSequence, 'validation')
 
         logging.info('finished loaders and generators. starting models')
-
-        model = model_loading.get_model(num_ftrs)
+        model = model_loading.get_model(num_ftrs) 
+        # model = model_loading.C3DFCNout(1, 16) #TEMP
+        # checkpoint = torch.load('net_d_chckp.pth') #TEMP
+        # state_dict = checkpoint #TEMP
+        # model.cnn[0].load_state_dict(state_dict) #TEMP
+        # model =  model_loading.NonDataParallel(model).cuda() 
+        
+        
+        if configs['use_binary_classifiers']:
+            for index, col_name in enumerate(configs['get_labels_columns']):
+                if configs['binary_classifiers_percentile_spacing']:
+                    if configs['binary_classifiers_use_borders']:
+                        percentiles = np.linspace(0,100,configs['n_binary_classifiers_when_percentile'])
+                    else:
+                        percentiles = np.linspace(0,100,configs['n_binary_classifiers_when_percentile']+2)[1:-1]
+                    model.module.final_layers.final_linear.set_bins(torch.tensor(np.percentile(train_loader.dataset.listImage[0][col_name], percentiles, interpolation = 'midpoint'), requires_grad = False).float().cuda().unsqueeze(0),index)
         #print(model)
 
         logging.info('finished models. starting criterion')
@@ -600,9 +706,9 @@ def load_training_pipeline(cases_to_use, all_images, all_labels, trainTransformS
             scheduler = utils.ReduceLROnPlateau(optimizer, factor = 0.1, patience = 5, mode = 'min', verbose = True)
         '''
         if configs['scheduler_to_use'] == 'plateau':
-            scheduler = utils.ReduceLROnPlateau(optimizer, factor = 0.1, patience = 5, mode = 'min', verbose = True)
+            scheduler = utils.ReduceLROnPlateau(optimizer, factor = 0.1, patience = configs['plateau_patience'], mode = 'min', verbose = True)
         if configs['scheduler_to_use'] == 'steps':
-            scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=configs['milestones_steps'], gamma=0.1)
+            scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones = configs['milestones_steps'], gamma=0.1)
         if configs['scheduler_to_use'] == 'cosine':
             scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max = 20, eta_min=1e-5, last_epoch=13 )
         models = models + [model]
@@ -765,16 +871,16 @@ def merge_images_and_labels(all_images, all_labels):
 
 
         try:
-            with open('./testsubjectids.pkl') as f:
+            with open(configs['local_directory'] + '/testsubjectids.pkl') as f:
                 testids = pickle.load(f)
         except TypeError:
-            with open('./testsubjectids.pkl', 'rb') as f:
+            with open(configs['local_directory'] + '/testsubjectids.pkl', 'rb') as f:
                 testids = pickle.load(f, encoding='latin1')
         try:
-            with open('./validationsubjectids.pkl') as f:
+            with open(configs['local_directory'] + '/validationsubjectids.pkl') as f:
                 valids = pickle.load(f)
         except TypeError:
-            with open('./validationsubjectids.pkl', 'rb') as f:
+            with open(configs['local_directory'] + '/validationsubjectids.pkl', 'rb') as f:
                 valids = pickle.load(f, encoding='latin1')
         joined_tables['split'] = 'train'
         joined_tables.loc[joined_tables['subjectid'].isin(testids),'split'] = 'test'
@@ -828,6 +934,9 @@ def main():
     cases_to_use = merge_images_and_labels(all_images, all_labels)
 
     models, criterions, optimizers, schedulers, train_loaders, test_loaders, eval_train_loaders = load_training_pipeline(cases_to_use, all_images, all_labels, trainTransformSequence, testTransformSequence, num_ftrs)
+    if configs['create_csv_for_segmentation_features']:
+        save_all_segmentation_features(train_loaders[0])
+        # save_all_segmentation_features(test_loaders[0])
 
     visualize = False
     if visualize:
@@ -836,6 +945,32 @@ def main():
             visualization.GradCAM(model).execute(test_loaders[i])
 
     train(models, criterions, optimizers, schedulers, train_loaders, test_loaders, eval_train_loaders)
+
+def save_all_segmentation_features(train_loader):
+    assert(not configs['use_random_crops'])
+    assert(configs['BATCH_SIZE']==1)
+    assert(not configs['use_horizontal_flip'])
+    my_df= []
+    vectors = []
+    for i, (input1, input2, target, column_values, extra_inputs, filepath, features, index)  in enumerate(train_loader):
+        feature_columns_tmp = ['row_corner_0','column_corner_0','row_corner_1','column_corner_1','angle','distance','area_lung','orientation_lung','lung_elongation','bounding_box_occupation','lung_eccentricity','average_intensity_lung','average_upper_half_intensity_lung','curl_diaphragm','ellipse_average_intensity','watershed_diaphragm_score','bounding_box_upper_corner_void_occupation','upper_corner_void_convexity']
+        features_columns = ['theta_0_0','theta_1_0','theta_0_1','theta_1_1','theta_0_2','theta_1_2'] + [feature_column + '-right' for feature_column in feature_columns_tmp]+ [feature_column + '-left' for feature_column in feature_columns_tmp]
+        line_to_add = {'filepath':filepath[0][0], 'index':index.numpy()[0]}
+        line_to_add.update({name:features[0,i].numpy() for i, name in enumerate(features_columns)})
+        vectors.append(features[0,...].numpy())
+        line_to_add.update({name:column_values[0][i].numpy() for i, name in enumerate(configs['all_output_columns'])})
+        my_df.append(line_to_add)
+
+        if (i%100)==0:
+            print(i)
+
+    # h5f = h5py.File('segmentation_features_test.h5', 'w')
+    # h5f.create_dataset('dataset_1', data=np.array(vectors))
+    # h5f.close()
+
+    my_df = pd.DataFrame(my_df)
+    my_df.to_csv('./segmentation_features.csv')
+    1/0
 
 if __name__ == '__main__':
     main()

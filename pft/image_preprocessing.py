@@ -10,7 +10,7 @@ import skimage
 from scipy.ndimage.interpolation import rotate
 from skimage.filters import rank
 from skimage.morphology import disk
-import cv2
+#import cv2
 import torchvision
 
 class UnNormalizeNumpy(object):
@@ -33,16 +33,18 @@ class UnNormalizeNumpy(object):
         return return_tensor
 
 class BatchUnNormalizeTensor(object):
-    def __init__(self, mean, std):
+    def __init__(self, mean, std, inversed_input_correction = True):
         self.mean = mean
         self.std = std
+        self.inversed_input_correction = inversed_input_correction
 
     def __call__(self, tensor):
-        mean = torch.FloatTensor(self.mean).cuda().view([1,3,1,1])
-        std = torch.FloatTensor(self.std).cuda().view([1,3,1,1])
-        print(torch.max(tensor))
-        print(torch.min(tensor))
-        to_return = (1-((-tensor*std)+mean)) #TEMP: corrrection because input is inversed
+        mean = torch.FloatTensor(self.mean).cuda().view([1,-1,1,1])
+        std = torch.FloatTensor(self.std).cuda().view([1,-1,1,1])
+        if self.inversed_input_correction:
+            to_return = (1-((-tensor*std)+mean)) #TEMP: corrrection because input is inversed
+        else:
+            to_return = ((tensor*std)+mean) #TEMP: corrrection because input is inversed
         if torch.max(to_return)>1.0000001:
             print(torch.max(to_return))
         if torch.min(to_return)<-0.0000001:
@@ -51,14 +53,19 @@ class BatchUnNormalizeTensor(object):
         return to_return
 
 class BatchNormalizeTensor(object):
-    def __init__(self, mean, std):
+    def __init__(self, mean, std, inversed_input_correction = False):
         self.mean = mean
         self.std = std
+        self.inversed_input_correction = inversed_input_correction
 
     def __call__(self, tensor):
         mean = torch.FloatTensor(self.mean).cuda().view([1,3,1,1])
         std = torch.FloatTensor(self.std).cuda().view([1,3,1,1])
-        return (tensor-mean)/std
+        if self.inversed_input_correction:
+            to_return = (tensor+mean-1)/std
+        else:
+            to_return = (tensor-mean)/std
+        return to_return
 
 class NormalizeNumpy(object):
     def __init__(self, mean, std):
@@ -167,22 +174,29 @@ class castTensor(object):
         return self.__class__.__name__ + '()'
 
 class HistogramEqualization(object):
-    def __init__(self, local = False, nbins = 256):
+    def __init__(self, normalization_mean, normalization_std, local = False, nbins = 256 ):
         self.local = local
         self.nbins = nbins
+        self.normalization_mean = normalization_mean
+        self.normalization_std = normalization_std
 
     def __call__(self, img):
         for channel in range(img.shape[0]):  # equalizing each channel
             image_min = np.min(img[channel, :, :])
             image_max = np.max(img[channel, :, :])
+            
+            image_min = -(0-self.normalization_mean[channel])/self.normalization_std[channel]
+            image_max = -(1-self.normalization_mean[channel])/self.normalization_std[channel]
             img[channel, :, :] = (img[channel, :, :] - image_min)/(image_max-image_min)
             if not self.local:
                 img[channel, :, :] = skimage.exposure.equalize_hist(img[channel, :, :], nbins = self.nbins)
 
             else:
-                a = disk(30)
-                img[channel, :, :] = (rank.equalize( img[channel, :, :], selem = a))
+                a = disk(15)
+                img[channel, :, :] = (rank.equalize( img[channel, :, :], selem = a))/255.
+            
             img[channel, :, :] = img[channel, :, :]*(image_max-image_min)+image_min
+            
         image_2 = img
 
         return image_2

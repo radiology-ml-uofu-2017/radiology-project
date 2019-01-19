@@ -4,7 +4,7 @@ import pandas as pd
 from configs import configs
 from torch.utils.data import Dataset
 import torch
-from h5df import Store
+#from h5df import Store
 import h5py
 import torchvision.transforms as transforms
 import image_preprocessing
@@ -14,6 +14,7 @@ from PIL import Image
 import model_loading
 import torchvision
 import copy
+from collections import OrderedDict
 try:
     import cPickle as pickle
 except:
@@ -106,15 +107,19 @@ def get_name_pickle_file():
     return '/home/sci/ricbl/Documents/projects/radiology-project/pft/images_'+''.join(configs['data_to_use'])+'_' +  size_all_images + '_prot3.pkl'
 
 class DatasetGenerator(Dataset):
-    def __init__ (self, pathDatasetFile, transform = None, train = False):
+    def __init__ (self, pathDatasetFile, transform = None, train = False, segmentation_features_file = None):
         super(DatasetGenerator, self).__init__()
         self.listImage = pathDatasetFile
         if configs['trainable_densenet'] and configs['load_image_features_from_file']:
+            if not configs['machine_to_use'] == 'titan':
+                folder = '/home/sci/ricbl/Documents/projects/temp_radiology/radiology-project/pft'
+            else:
+                folder = '/scratch_ssd/ricbl/pft'
             if not configs['magnification_input']>1:
                 self.file = h5py.File(get_name_h5_file(), 'r')
             else:
-                assert(configs['magnification_input']<4)
-                self.file = h5py.File('/scratch_ssd/ricbl/pft/images_2012-20162017_1024_1024.prot3.h5', 'r')
+                assert(configs['magnification_input']<=4)
+                self.file = h5py.File(folder + '/images_2012-20162017_1024_1024.prot3.h5', 'r') #'/scratch_ssd/ricbl/pft/images_2012-20162017_1024_1024.prot3.h5', 'r')
 
             #much slower
             #store = Store('all_images_224_224_prot2.2.h5df', mode="r")
@@ -122,8 +127,11 @@ class DatasetGenerator(Dataset):
         self.n_images = len(self.listImage[0])
         self.transform = transform
         self.train = train
-        if (configs['use_unet_segmentation'] or configs['register_with_segmentation']) and configs['segmentation_in_loading']:
-            self.segmentation = model_loading.SegmentationNetwork().cuda()
+        if (configs['use_unet_segmentation'] or configs['register_with_segmentation'] or  configs['calculate_segmentation_features']) and configs['segmentation_in_loading']:
+            if configs['use_precalculated_segmentation_features']:
+                self.segmentation = h5py.File(segmentation_features_file, 'r')
+            else:
+                self.segmentation = model_loading.SegmentationNetwork().cuda()
     #--------------------------------------------------------------------------------
 
     def __getitem__(self, index):
@@ -131,6 +139,7 @@ class DatasetGenerator(Dataset):
             index = int(index)
         imageData = []
         filepath=[]
+        vectorized_features = 0
         for i in range(len(self.listImage)):
             if (configs['trainable_densenet'] and (not configs['load_image_features_from_file'])):
                 imagePath = self.listImage[i]['filepath'].iloc[index]
@@ -165,10 +174,43 @@ class DatasetGenerator(Dataset):
 
             #imageData[i] = np.expand_dims(imageData[i], 0)
             filepath.append(self.listImage[i]['filepath'].iloc[index])
-            if (configs['use_unet_segmentation'] or configs['register_with_segmentation']) and configs['segmentation_in_loading']:
+
+            if (configs['use_unet_segmentation'] or configs['register_with_segmentation'] or configs['calculate_segmentation_features']) and configs['segmentation_in_loading'] and not configs['use_precalculated_segmentation_features']:
+                #assert(not configs['register_with_segmentation']) #TODO: implement registration somewhere
                 if i == 0 or configs['use_unet_segmentation_for_lateral']:
                     imageData[i], features = self.segmentation(imageData[i].cuda().unsqueeze(0))
+                    
+                    features = features[0]
+                    
+                    if configs['register_with_segmentation']:
+                        grid = torch.nn.functional.affine_grid(features['theta'].unsqueeze(0), imageData[i].size())
+                        imageData[i] = torch.nn.functional.grid_sample(imageData[i], grid)
+                        
                     imageData[i] = imageData[i].squeeze(0).cpu()
+                    
+                    vectorized_features = OrderedDict()
+                    vectorized_features.update({'theta_0_0': features['theta'][0][0].cpu(), 'theta_1_0': features['theta'][1][0].cpu(), \
+                    'theta_0_1': features['theta'][0][1].cpu(),'theta_1_1': features['theta'][1][1].cpu(), \
+                    'theta_0_2': features['theta'][0][2].cpu(),'theta_1_2': features['theta'][1][2].cpu()})
+                    feature_columns = ['row_corner_0','column_corner_0','row_corner_1','column_corner_1','angle','distance','area_lung','orientation_lung','lung_elongation','bounding_box_occupation','lung_eccentricity','average_intensity_lung','average_upper_half_intensity_lung','curl_diaphragm','ellipse_average_intensity','watershed_diaphragm_score','bounding_box_upper_corner_void_occupation','upper_corner_void_convexity']
+                    if 'right' in features.keys() and features['right'] is not None :
+                        vectorized_features.update({feature_column+'-right':features['right'][feature_column] for feature_column in feature_columns})
+                    else:
+                        vectorized_features.update({feature_column+'-right':0 for feature_column in feature_columns})
+                    if 'left' in features.keys() and features['left'] is not None :
+                        vectorized_features.update({feature_column+'-left':features['left'][feature_column] for feature_column in feature_columns})
+                    else:
+                        vectorized_features.update({feature_column+'-left':0 for feature_column in feature_columns})
+                
+        if (configs['use_unet_segmentation'] or configs['register_with_segmentation'] or configs['calculate_segmentation_features']) and configs['segmentation_in_loading']:
+            if not configs['use_precalculated_segmentation_features']:
+                feature_columns_tmp = ['row_corner_0','column_corner_0','row_corner_1','column_corner_1','angle','distance','area_lung','orientation_lung','lung_elongation','bounding_box_occupation','lung_eccentricity','average_intensity_lung','average_upper_half_intensity_lung','curl_diaphragm','ellipse_average_intensity','watershed_diaphragm_score','bounding_box_upper_corner_void_occupation','upper_corner_void_convexity']
+                features_columns = ['theta_0_0','theta_1_0','theta_0_1','theta_1_1','theta_0_2','theta_1_2'] + [feature_column + '-right' for feature_column in feature_columns_tmp]+ [feature_column + '-left' for feature_column in feature_columns_tmp]
+                vectorized_features = [float(vectorized_features[key]) for key in features_columns]
+            else:
+                vectorized_features = self.segmentation['dataset_1'][index,...]
+        vectorized_features = torch.tensor(vectorized_features)
+
         #imageData = np.concatenate(imageData,0)
         # for checking integrity of images and rest of data
         #a = self.listImage[labels_columns]
@@ -186,15 +228,14 @@ class DatasetGenerator(Dataset):
         if (configs['relative_noise_to_add_to_label'] is not None) and (self.train):
             imageLabel = torch.FloatTensor(np.random.normal(imageLabel, imageLabel * configs['relative_noise_to_add_to_label']))
         imageAllColumns= torch.FloatTensor(self.listImage[0][configs['all_output_columns']].iloc[index])
-
         if configs['use_extra_inputs']:
             col_extra_inputs = [col for col in self.listImage[0] if col.startswith('tobacco_status_')]+[col for col in self.listImage[0] if col.startswith('smoking_tobacco_status_')]+['binary_gender']+['age']
             extra_inputs = torch.FloatTensor(self.listImage[0][col_extra_inputs].iloc[index])
+            extra_inputs[-1] = extra_inputs[-1]/100.
         else:
             extra_inputs = []
-
         #self.transform = transforms.ToTensor()
-        return imageData[0], (None if len(self.listImage)==1 else imageData[1]), imageLabel, imageAllColumns, extra_inputs, filepath
+        return imageData[0], ([] if len(self.listImage)==1 else imageData[1]), imageLabel, imageAllColumns, extra_inputs, filepath, vectorized_features, index
 
     def __len__(self):
         return self.n_images
@@ -276,8 +317,8 @@ def get_all_images():
     num_ftrs = None
     list_pretransforms =[]
     if (not configs['load_image_features_from_file']) or configs['trainable_densenet']:
-        normalize = transforms.Normalize([0.485, 0.456, 0.406],
-                                            [0.229, 0.224, 0.225])
+        normalize = transforms.Normalize(configs['normalization_mean'],
+                                            configs['normalization_std'])
 
         if configs['use_random_crops']:
             resize_size = 256
@@ -402,9 +443,9 @@ def get_images():
             test_list_transforms[0] += [image_preprocessing.CropOneSideNumpy(0)]
         if not configs['histogram_equalization'] == 'none':
             for a_list_transform in train_list_transforms:
-                a_list_transform += [image_preprocessing.HistogramEqualization(local = (configs['histogram_equalization']=='local'))]
+                a_list_transform += [image_preprocessing.HistogramEqualization(configs['normalization_mean'], configs['normalization_std'], local = (configs['histogram_equalization']=='local'))]
             for a_list_transform in test_list_transforms:
-                a_list_transform += [image_preprocessing.HistogramEqualization(local = (configs['histogram_equalization']=='local'))]
+                a_list_transform += [image_preprocessing.HistogramEqualization(configs['normalization_mean'], configs['normalization_std'], local = (configs['histogram_equalization']=='local'))]
     for a_list_transform in train_list_transforms:
         a_list_transform += [image_preprocessing.castTensor()]
     for a_list_transform in test_list_transforms:

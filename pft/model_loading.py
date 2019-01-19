@@ -26,10 +26,11 @@ import scipy
 import time
 from skimage.feature import corner_harris, corner_subpix, corner_peaks, corner_shi_tomasi, corner_foerstner,corner_fast, corner_orientations
 import matplotlib.pyplot as plt
-import cv2
 from skimage.morphology import octagon, disk, binary_erosion, watershed
 from skimage.draw import ellipse, ellipse_perimeter, polygon, line
 import copy
+from collections import OrderedDict
+from scipy.optimize import curve_fit
 
 np.seterr(divide = "raise", over="warn", under="warn",  invalid="raise")
 
@@ -129,11 +130,11 @@ class SegmentationNetwork(nn.Module):
         self.padding_margin = 4*8
 
     def load_unet_model(self, model):
-        model.load_state_dict(torch.load('./models/'+configs['unet_model_file']))
+        model.load_state_dict(torch.load(configs['local_directory'] + '/models/'+configs['unet_model_file']))
         return model
 
     def get_pretrained_unet(self):
-        if configs['use_unet_segmentation'] or configs['register_with_segmentation']:
+        if configs['use_unet_segmentation'] or configs['register_with_segmentation'] or configs['calculate_segmentation_features']:
             model = unet_models.UNet()
             model = self.load_unet_model(model)
             return model
@@ -192,10 +193,11 @@ class SegmentationNetwork(nn.Module):
         return chosen_corner
 
     def get_features_lung(self, region_properties_image, chosen_corner, image_corners, padding_margin, region_in_the_left_of_image, original_image_padded):
-        features = {'row_corner_0':chosen_corner[0][0]-padding_margin,
+        features = OrderedDict()
+        features.update({'row_corner_0':chosen_corner[0][0]-padding_margin,
                     'column_corner_0':chosen_corner[0][1]-padding_margin,
                     'row_corner_1':chosen_corner[1][0]-padding_margin,
-                    'column_corner_1':chosen_corner[1][1]-padding_margin}
+                    'column_corner_1':chosen_corner[1][1]-padding_margin})
         try:
             features['angle'] = np.arctan((chosen_corner[0][0]-chosen_corner[1][0])/float(chosen_corner[1][1]-chosen_corner[0][1])) if region_in_the_left_of_image else np.arctan((chosen_corner[1][0]-chosen_corner[0][0])/float(chosen_corner[0][1]-chosen_corner[1][1]))
         except FloatingPointError:
@@ -222,34 +224,35 @@ class SegmentationNetwork(nn.Module):
         return features
 
     def get_diaphragm_measures(self, chosen_corner, distance, angle, image_corners, region_in_the_left_of_image):
+        watershed_score = self.get_diaphragm_watershed_score(chosen_corner, image_corners, distance, region_in_the_left_of_image)
         try:
-            rr, cc = ellipse(int((chosen_corner[0][0]+chosen_corner[1][0])/2), int((chosen_corner[0][1]+chosen_corner[1][1])/2),max(int(round(0.3*distance)),10), int(round(distance/2.)), rotation=angle)
+            rr, cc = ellipse(int((chosen_corner[0][0]+chosen_corner[1][0])/2), int((chosen_corner[0][1]+chosen_corner[1][1])/2),max(int(round(0.3*distance)),10), int(round(distance/2.)), rotation=angle, shape = image_corners.shape)
+            a = np.zeros_like(image_corners)
+            a[rr, cc] = 1
+            only_ellipse_perimeter = a-binary_erosion(a)
+            masked = a*image_corners
+            masked[np.nonzero(only_ellipse_perimeter)] = 1
+            if distance>=5:
+                try:
+                    curl_diaphragm = float(distance)/(perimeter(masked, neighbourhood  = 8)-perimeter(a, neighbourhood  = 8)/2.-perimeter(only_ellipse_perimeter, neighbourhood  = 8)/2.)
+                except FloatingPointError:
+                    print(perimeter(only_ellipse_perimeter, neighbourhood  = 8))
+                    print(perimeter(masked, neighbourhood  = 8))
+                    print(perimeter(a, neighbourhood  = 8))
+                    print(distance)
+                    curl_diaphragm = 0
+            else:
+                curl_diaphragm = 1
+            ellipse_average_intensity = np.sum(image_corners[rr, cc])/float(len(rr))
         except FloatingPointError:
             print(int((chosen_corner[0][0]+chosen_corner[1][0])/2))
             print( int((chosen_corner[0][1]+chosen_corner[1][1])/2))
             print(distance)
-            raise
-        a = np.zeros_like(image_corners)
-        a[rr, cc] = 1
-        only_ellipse_perimeter = a-binary_erosion(a)
-        masked = a*image_corners
-        masked[np.nonzero(only_ellipse_perimeter)] = 1
-        if distance>=5:
-            try:
-                curl_diaphragm = float(distance)/(perimeter(masked, neighbourhood  = 8)-perimeter(a, neighbourhood  = 8)/2.-perimeter(only_ellipse_perimeter, neighbourhood  = 8)/2.)
-            except FloatingPointError:
-                print(perimeter(only_ellipse_perimeter, neighbourhood  = 8))
-                print(perimeter(masked, neighbourhood  = 8))
-                print(perimeter(a, neighbourhood  = 8))
-                print(distance)
-                curl_diaphragm = -123
-        else:
-            curl_diaphragm = 1
-        ellipse_average_intensity = np.sum(image_corners[rr, cc])/float(len(rr))
-        watershed_score = self.get_diaphragm_watershed_score(chosen_corner, image_corners, distance, region_in_the_left_of_image)
-        return {'curl_diaphragm': curl_diaphragm,
+            curl_diaphragm = 0
+            ellipse_average_intensity = 0
+        return OrderedDict({'curl_diaphragm': curl_diaphragm,
                 'ellipse_average_intensity': ellipse_average_intensity,
-                'watershed_diaphragm_score':watershed_score}
+                'watershed_diaphragm_score':watershed_score})
 
     def get_diaphragm_watershed_score(self, chosen_corner, image_corners, distance, region_in_the_left_of_image):
         upper_polygon = polygon([chosen_corner[0][0],chosen_corner[1][0], 0, 0], [chosen_corner[0][1],chosen_corner[1][1],chosen_corner[1][1], chosen_corner[0][1]], shape = image_corners.shape )
@@ -296,7 +299,9 @@ class SegmentationNetwork(nn.Module):
         watershed_void = watershed(1-image_convexity_upper_void,watershed_void_marker,mask = 1-image_convexity_upper_void)
         bounding_box_upper_corner_void_occupation = float(np.sum(watershed_void))/(area_lung/2.)
         upper_corner_void_convexity = float(np.sum(watershed_void))/float(abs(first_point_region[0]-lower_corner_region[0])*abs(first_point_region[1]-lower_corner_region[1])/2.)
-        return {'bounding_box_upper_corner_void_occupation':bounding_box_upper_corner_void_occupation,'upper_corner_void_convexity':upper_corner_void_convexity, 'temp_watershed':watershed_void}
+        return OrderedDict({'bounding_box_upper_corner_void_occupation':bounding_box_upper_corner_void_occupation,
+        'upper_corner_void_convexity':upper_corner_void_convexity,
+        'temp_watershed':watershed_void})
 
     def get_theta(self, regions_properties_image, rows = 224, cols = 224):
         if len(regions_properties_image)>1:
@@ -306,10 +311,12 @@ class SegmentationNetwork(nn.Module):
                             max(regions_properties_image[0].bbox[3],regions_properties_image[1].bbox[3])]
         else:
             bounding_box = regions_properties_image[0].bbox
+        '''
         bounding_box = [max(bounding_box[0]-int(rows/224.*15),0), \
                         max(bounding_box[1]-int(cols/224.*15),0), \
                         min(bounding_box[2]+int(rows/224.*15),rows), \
                         min(bounding_box[3]+int(cols/224.*15),cols)]
+        '''
         theta = torch.tensor(
         [[1./(-float(cols)/(bounding_box[1]-bounding_box[3])), \
         0, \
@@ -323,7 +330,7 @@ class SegmentationNetwork(nn.Module):
     def get_segmentation_and_features(self, xi_to_segment):
         if configs['extra_histogram_equalization_for_segmentation']:
             assert(configs['initial_lr_unet']==0)
-            xi_to_segment = torch.tensor(np.array([image_preprocessing.HistogramEqualization()(image) for image in xi_to_segment.detach().cpu().numpy()])).float().cuda()
+            xi_to_segment = torch.tensor(np.array([image_preprocessing.HistogramEqualization(configs['normalization_mean'], configs['normalization_std'])(image) for image in xi_to_segment.detach().cpu().numpy()])).float().cuda()
         segmented_xi = 1-torch.sigmoid(self.segmentation(torch.mean(xi_to_segment, dim = 1, keepdim = True)))
         if not (configs['magnification_input']==1):
             segmented_xi = torch.nn.functional.interpolate(segmented_xi, scale_factor=configs['magnification_input'], mode = 'bilinear')
@@ -363,22 +370,30 @@ class SegmentationNetwork(nn.Module):
                     segmented_xi_list.append(segmented_xi_region)
                     segmented_xis[k,...] += segmented_xi_region
                 features_regions = {}
-                if len(regions_properties_image)>1:
-                    first_big = regions_properties_image[0].area>regions_properties_image[1].area
-                    first_elongated = regions_properties_image[0].inertia_tensor_eigvals[0]/regions_properties_image[0].inertia_tensor_eigvals[1] - regions_properties_image[1].inertia_tensor_eigvals[0]/regions_properties_image[1].inertia_tensor_eigvals[1]
-                    original_lung_position_in_body = ['right', 'left'] if (first_elongated < 0 if abs(first_elongated)>0.5 else first_big) else ['left', 'right']
+                if not configs['use_horizontal_flip']:
+                    original_lung_position_in_body = []
+                    for j in range(len(regions_properties_image)):
+                        original_lung_position_in_body.append('right' if (regions_properties_image[j].centroid[1]<segmented_xi.size(3)/2) else 'left')
                 else:
-                    original_lung_position_in_body = ['left']
+                    if len(regions_properties_image)>1:
+                        first_big = regions_properties_image[0].area>regions_properties_image[1].area
+                        first_elongated = regions_properties_image[0].inertia_tensor_eigvals[0]/regions_properties_image[0].inertia_tensor_eigvals[1] - regions_properties_image[1].inertia_tensor_eigvals[0]/regions_properties_image[1].inertia_tensor_eigvals[1]
+                        original_lung_position_in_body = ['right', 'left'] if (first_elongated < 0 if abs(first_elongated)>0.5 else first_big) else ['left', 'right']
+                    else:
+                        original_lung_position_in_body = ['left']
                 for j in range(len(segmented_xi_list)):
                     originally_right_lung = original_lung_position_in_body[j]=='right'
                     region_in_the_left_of_image = regions_properties_image[j].centroid[1]<segmented_xi.size(3)/2
+                    if region_in_the_left_of_image and not originally_right_lung:
+                        assert(False)
                     features = self.get_features_for_region( regions_properties_image[j], segmented_xi_list[j],xi_to_segment[k],region_in_the_left_of_image, originally_right_lung, ax, k)
                     features_regions[original_lung_position_in_body[j]] = features
-                if configs['register_with_segmentation']:
-                    features_regions['theta'] = self.get_theta(regions_properties_image, segmented_xi.size(2), segmented_xi.size(3))
+                features_regions['theta'] = self.get_theta(regions_properties_image, segmented_xi.size(2), segmented_xi.size(3))
                 features_images.append(features_regions)
             # fig.savefig('./test_corners.png')
             # plt.close('all')
+        else:
+            segmented_xis = segmented_xi
         return segmented_xis, features_images
 
     def forward(self, xi):
@@ -386,10 +401,9 @@ class SegmentationNetwork(nn.Module):
             xi_to_segment = torch.nn.functional.interpolate(xi, scale_factor=1./configs['magnification_input'], mode = 'bilinear')
         else:
             xi_to_segment = xi
-        xi_to_segment = -((image_preprocessing.BatchUnNormalizeTensor([0.485, 0.456, 0.406],[0.229, 0.224, 0.225])(xi_to_segment))-0.5)*2
+        xi_to_segment = -((image_preprocessing.BatchUnNormalizeTensor(configs['normalization_mean'],configs['normalization_std'])(xi_to_segment))-0.5)*2
 
         segmented_xi, features = self.get_segmentation_and_features(xi_to_segment)
-
         if configs['register_with_segmentation']:
             grid = F.affine_grid(torch.cat([features_regions['theta'].unsqueeze(0) for features_regions in features]), segmented_xi.size())
             segmented_xi = F.grid_sample(segmented_xi, grid)
@@ -402,7 +416,7 @@ class SegmentationNetwork(nn.Module):
             else:
                 segmented_xi = segmented_xi.expand(-1,3,-1,-1)
                 if configs['normalization_segmentation']:
-                    segmented_xi = image_preprocessing.BatchNormalizeTensor([0.485, 0.456, 0.406],[0.229, 0.224, 0.225])(segmented_xi)
+                    segmented_xi = image_preprocessing.BatchNormalizeTensor(configs['normalization_mean'],configs['normalization_std'])(segmented_xi)
                 xi = torch.cat([xi[:,0:1,...], mult_xi[:,0:1,...], segmented_xi[:,2:3,...]], dim = 1)
         return xi, features
 
@@ -412,20 +426,25 @@ class ModelMoreInputs(nn.Module):
 
         self.n_inputs, self.n_cnns = get_qt_inputs()
         self.stn = STN()
-        if (configs['use_unet_segmentation'] or configs['register_with_segmentation']) and not configs['segmentation_in_loading']:
+        if (configs['use_unet_segmentation'] or configs['register_with_segmentation'] or configs['calculate_segmentation_features']) and not configs['segmentation_in_loading']:
             self.segmentation = SegmentationNetwork()
         else:
             self.segmentation =nn.Sequential()
 
         cnns = []
+        bns = []
         for i in range(self.n_cnns):
             if configs['trainable_densenet']:
                 new_cnn = get_model_cnn()
                 num_ftrs = new_cnn.num_ftrs
                 cnns.append(new_cnn)
+
             else:
                 cnns.append(nn.Sequential())
+            if configs['normalize_lateral_and_frontal_with_bn']:
+                bns.append(torch.nn.BatchNorm2d(num_ftrs))
         self.cnn = nn.ModuleList(cnns)
+        self.bns = nn.ModuleList(bns)
         self.final_layers = FinalLayers(num_ftrs, self.n_inputs)
 
     def forward(self, images1, images2, extra_fc_input, epoch ):
@@ -440,10 +459,12 @@ class ModelMoreInputs(nn.Module):
                 xi = self.stn(imageList[i])
             else:
                 xi = imageList[i]
-            if (configs['use_unet_segmentation'] or configs['register_with_segmentation']) and not configs['segmentation_in_loading']:
+            if (configs['use_unet_segmentation'] or configs['register_with_segmentation'] or configs['calculate_segmentation_features']) and not configs['segmentation_in_loading']:
                 if i == 0 or configs['use_unet_segmentation_for_lateral']:
                     xi, _ = self.segmentation(xi)
             xi = self.cnn[index](xi)
+            if configs['normalize_lateral_and_frontal_with_bn']:
+                xi = self.bns[index](xi)
             all_outputs.append(xi)
         x, extra_outs = self.final_layers(all_outputs, extra_fc_input, epoch)
         return x, extra_outs
@@ -649,7 +670,10 @@ class MeanVarLossMean(nn.Module):
     def __init__(self, col_name, bins):
         super(MeanVarLossMean, self).__init__()
         self.bins = bins
-
+    
+    def set_bins(self, bins):
+        self.bins = bins
+    
     def forward(self, input):
         x = torch.sum(input*self.bins.expand_as(input), dim = 1)
         if len(x.size())>1:
@@ -677,7 +701,11 @@ class MeanVarLossOutput(nn.Module):
             outputs_list.append(one_output)
         self.intermediary_probabilities_module_list = nn.ModuleList(intermediary_probabilities_list)
         self.outputs_module_list = nn.ModuleList(outputs_list)
-
+        
+    def set_bins(self, bins, index):
+        self.bins[index] = bins
+        self.outputs_module_list[index].probs_to_mean.set_bins(bins)
+        
     def forward(self, input):
         intermediary_logits_list = []
         outputs_list = []
@@ -695,8 +723,138 @@ class MeanVarLossOutput(nn.Module):
             argmax_list.append(torch.index_select(self.bins[index], dim = 1, index = max_probs).squeeze(0))
         distribution_averages = torch.stack(outputs_list,dim = 1)
         outputs = distribution_averages
-        return outputs, intermediary_logits_list, distribution_averages
+        return outputs, {'logits':intermediary_logits_list, 'averages':distribution_averages}
 
+class FitSigmoidOutput(nn.Module):
+    def __init__(self, bins):
+        super(FitSigmoidOutput, self).__init__()
+        assert(configs['network_output_kind']=='linear')
+        self.bins = bins.squeeze(0).cpu().numpy()
+    
+    def sigmoid(self,x,x0,k):
+        return 1/(1+np.exp(k*(x-x0)))
+    
+    def set_bins(self, bins):
+        self.bins = bins.squeeze(0).cpu().numpy()
+            
+    def forward(self, input):
+        output = []
+        for i in range(input.size(0)):
+            #print(input[i].detach().cpu().numpy().shape)
+            #print(self.bins.shape)
+            try:
+                popt, pcov = curve_fit(self.sigmoid, self.bins, input[i].detach().cpu().numpy(), p0=[0.7, 5])
+                output.append(popt[0])
+            except RuntimeError:
+                output.append(0.0)
+        #print(torch.tensor(output).size())
+        return torch.tensor(output).cuda().float().view(-1,1)
+        
+class FitStepOutput(nn.Module):
+    def __init__(self, bins):
+        super(FitStepOutput, self).__init__()
+        
+        assert(configs['network_output_kind']=='linear')
+        self.bins = bins.squeeze(0)
+    
+    def set_bins(self, bins):
+        self.bins = bins.squeeze(0)
+            
+    def forward(self, input):
+        scores = torch.zeros([input.size(0), len(self.bins)+1]).cuda()
+        scores[:,0] = torch.zeros([input.size(0)]).cuda() #torch.sum((input)**2, dim = 1)
+        for i in range(len(self.bins)):
+            scores[:,i+1] = scores[:,i] + 1 - 2*input[:,i]
+        indices = torch.argmin(scores, dim = 1)
+        bins_to_select = torch.cat([self.bins[:1], self.bins, self.bins[-1:]])
+        chosen_values = (bins_to_select[indices] + bins_to_select[indices+1])/2
+        return chosen_values.unsqueeze(1)
+
+class BinaryClassifiersOutput(nn.Module):
+    def __init__(self, in_features, bins):
+        super(BinaryClassifiersOutput, self).__init__()
+        self.bins = bins
+        intermediary_probabilities_list = []
+        outputs_list = []
+        for index, output_column_name in enumerate(configs['get_labels_columns']):
+            output_size_linear_layer= configs['n_binary_classifiers_when_percentile'] if configs['binary_classifiers_percentile_spacing'] else bins[index].size()[1]
+            one_output = nn.Sequential()
+            one_output.add_module('linear_to_logits', nn.Linear(in_features, output_size_linear_layer))
+
+            intermediary_probabilities_list.append(one_output)
+            one_output = nn.Sequential()
+            
+            if configs['post_binary_classifiers_fit_or_linear']=='fit':
+                one_output.add_module('logits_to_probs', nn.Sigmoid())
+                if configs['binary_classifiers_fit_type']=='sigmoid':
+                    one_output.add_module('fit_sigmoid', FitSigmoidOutput(self.bins[index]))
+                elif configs['binary_classifiers_fit_type']=='step':
+                    one_output.add_module('fit_sigmoid', FitStepOutput(self.bins[index]))
+            elif configs['post_binary_classifiers_fit_or_linear']=='linear':
+                for i in range(configs['binary_classifiers_n_post_layers']-1):
+                    one_output.add_module('binary_classifier_inter_layer_' + str(i), nn.Linear(output_size_linear_layer, output_size_linear_layer))
+                    one_output.add_module('binary_classifier_inter_layer_relu_' + str(i), nn.ReLU())
+                one_output.add_module('probs_to_mean', nn.Linear(output_size_linear_layer, 1))
+            
+            outputs_list.append(one_output)
+        self.intermediary_probabilities_module_list = nn.ModuleList(intermediary_probabilities_list)
+        self.outputs_module_list = nn.ModuleList(outputs_list)
+    
+    def set_bins(self, bins, index):
+        self.bins[index] = bins
+        self.outputs_module_list[index].fit_sigmoid.set_bins(bins)
+    
+    def forward(self, input):
+        intermediary_logits_list = []
+        outputs_list = []
+        size0 = input.size()[0]
+        for index, output_column_name in enumerate(configs['get_labels_columns']):
+            #TODO: if output kind is sigmoid, or maybe if output is copd, skip next two lines
+            intermediary_logits_one_output = self.intermediary_probabilities_module_list[index](input)
+            intermediary_logits_list.append(intermediary_logits_one_output)
+            one_output = self.outputs_module_list[index](intermediary_logits_one_output)
+            outputs_list.append(one_output.squeeze(1))
+        distribution_averages = torch.stack(outputs_list,dim = 1)
+        outputs = distribution_averages
+        return outputs, {'logits':intermediary_logits_list, 'averages':distribution_averages}
+
+class LineClassifiersOutput(nn.Module):
+    def __init__(self, in_features, bins):
+        super(LineClassifiersOutput, self).__init__()
+        self.bins = bins
+        intermediary_probabilities_list = []
+        outputs_list = []
+        for index, output_column_name in enumerate(configs['get_labels_columns']):
+            output_size_linear_layer= configs['n_binary_classifiers_when_percentile'] if configs['binary_classifiers_percentile_spacing'] else bins[index].size()[1]
+            one_output = nn.Sequential()
+            one_output.add_module('linear_to_logits', nn.Linear(in_features, output_size_linear_layer))
+
+            intermediary_probabilities_list.append(one_output)
+            one_output = nn.Sequential()
+            one_output.add_module('probs_to_mean', nn.Linear(output_size_linear_layer, 2))
+            #one_output.add_module('logits_to_probs', nn.Softplus())
+            
+            outputs_list.append(one_output)
+        self.intermediary_probabilities_module_list = nn.ModuleList(intermediary_probabilities_list)
+        self.outputs_module_list = nn.ModuleList(outputs_list)
+
+    def forward(self, input):
+        intermediary_logits_list = []
+        outputs_list = []
+        size0 = input.size()[0]
+        for index, output_column_name in enumerate(configs['get_labels_columns']):
+            #TODO: if output kind is sigmoid, or maybe if output is copd, skip next two lines
+            intermediary_logits_one_output = self.intermediary_probabilities_module_list[index](input)
+            one_output = self.outputs_module_list[index](intermediary_logits_one_output)
+            #intermediary_logits_list.append(-nn.Softplus()(one_output[:,0]).unsqueeze(1)*self.bins[index] + one_output[:,1].unsqueeze(1))
+            intermediary_logits_list.append(-nn.Softplus()(one_output[:,0]).unsqueeze(1)*self.bins[index] + one_output[:,1].unsqueeze(1).detach()*nn.Softplus()(one_output[:,0]).unsqueeze(1))
+            #print(intermediary_logits_list[index])
+            #outputs_list.append(one_output[:,1]/nn.Softplus()(one_output[:,0]))
+            outputs_list.append(one_output[:,1])
+        distribution_averages = torch.stack(outputs_list,dim = 1)
+        outputs = distribution_averages
+        return outputs, {'logits':intermediary_logits_list, 'averages':distribution_averages}
+        
 class MultiplyInGroups(nn.Module):
     def __init__(self, n_groups):
         super(MultiplyInGroups, self).__init__()
@@ -783,7 +941,7 @@ class ModelDSNMPart(nn.Module):
 class ModelSpatialToFlatPart(nn.Module):
     def __init__(self, num_ftrs):
         super(ModelSpatialToFlatPart, self).__init__()
-
+        
         _, self.n_cnns = get_qt_inputs()
         spatial_parts = []
         for i in range(self.n_cnns):
@@ -791,7 +949,7 @@ class ModelSpatialToFlatPart(nn.Module):
             spatial_parts.append(this_spatial_part)
         self.spatial_part = nn.ModuleList(spatial_parts)
         self.spatial_part.apply(weights_init)
-
+        
         if configs['use_delayed_lateral_pooling']:
             self.spatial_part2 = nn.Sequential()
             self.spatial_part2.add_module("conv1avgpool",nn.Conv2d(kernel_size = (3,1), in_channels = 1024, out_channels =  256, padding=(1,0),bias=True).cuda())
@@ -799,7 +957,7 @@ class ModelSpatialToFlatPart(nn.Module):
             self.spatial_part2.add_module("conv2avgpool",nn.Conv2d(kernel_size = (3,1), in_channels = 256, out_channels =  256, padding=(1,0),bias=True).cuda())
             self.spatial_part2.add_module("avgpool2",nn.AvgPool2d(kernel_size = (configs['avg_pool_kernel_size'],1)).cuda())
             self.current_n_channels = 256
-
+    
     def forward(self, spatial_outputs):
         all_outputs = []
         for i, spatial_output in enumerate(spatial_outputs):
@@ -817,6 +975,50 @@ class ModelSpatialToFlatPart(nn.Module):
             x = x.view(x.size(0), -1)
         return x,spatial_outputs
 
+class LogQuotientOutput(nn.Module):
+    def __init__(self, current_n_channels):
+        super(LogQuotientOutput, self).__init__()
+        self.softplus = torch.nn.Softplus()
+        self.linear = nn.Linear(current_n_channels, 2*len(labels_columns))
+    
+    def forward(self, input):
+        x = self.linear(input)
+        x = x.view([-1, 2,len(labels_columns)])
+        x2 = torch.log(self.softplus(x[:,0,:])/self.softplus(x[:,1,:]))
+        if self.training :
+            grad_to_improve, = torch.autograd.grad(x2, x,
+                               grad_outputs=x2.data.new(x2.shape).fill_(1),
+                               create_graph=True)
+        else:
+            grad_to_improve = x.data.new(x.shape).fill_(0)
+        return x2, {'grad_to_improve':grad_to_improve}
+
+class ContinuousBinaryClassifiersOutput(nn.Module):
+    def __init__(self, current_n_channels):
+        super(ContinuousBinaryClassifiersOutput, self).__init__()
+        self.softplus = torch.nn.Softplus()
+        self.linear = nn.Linear(current_n_channels, 2*len(labels_columns))
+    
+    def forward(self, input):
+        x = self.linear(input)
+        x = x.view([-1, 2,len(labels_columns)])
+        x2 = torch.log(self.softplus(x[:,0,:])/self.softplus(x[:,1,:]))
+        if self.training :
+            grad_to_improve, = torch.autograd.grad(x2, x,
+                               grad_outputs=x2.data.new(x2.shape).fill_(1),
+                               create_graph=True)
+        else:
+            grad_to_improve = x.data.new(x.shape).fill_(0)
+        return x2, {'grad_to_improve':grad_to_improve}
+        
+class CommonLinearOutput(nn.Module):
+    def __init__(self, current_n_channels):
+        super(CommonLinearOutput, self).__init__()
+        self.linear = nn.Linear(current_n_channels , len(labels_columns)).cuda()
+    
+    def forward(self, x):
+        return self.linear(x), {}
+
 class ModelLastLinearLayer(nn.Module):
     def __init__(self, current_n_channels):
         super(ModelLastLinearLayer, self).__init__()
@@ -828,7 +1030,7 @@ class ModelLastLinearLayer(nn.Module):
                 self.final_linear_layer.add_module("bn_out",torch.nn.BatchNorm1d(self.current_n_channels).cuda())
             self.final_linear_layer.add_module("drop_out",nn.Dropout(p=configs['use_dropout_hidden_layers']).cuda())
 
-        if configs['use_mean_var_loss']:
+        if configs['use_mean_var_loss'] or configs['use_binary_classifiers']:
             self.bins_list = []
             for index, col_name in enumerate(configs['get_labels_columns']):
                 if configs['use_sigmoid_safety_constants']:
@@ -838,22 +1040,26 @@ class ModelLastLinearLayer(nn.Module):
                     min_range = configs['pre_transform_labels'].ranges_labels[col_name][0]
                     max_range = configs['pre_transform_labels'].ranges_labels[col_name][1]
                 spacing = configs['meanvarloss_discretization_spacing']
-                self.bins_list.append(torch.autograd.Variable(torch.arange(min_range, max_range+spacing, spacing).unsqueeze(0).cuda(async=True, device = 0), requires_grad=False) )
-
-            linear_out_model = MeanVarLossOutput(self.current_n_channels, self.bins_list).cuda()
+                self.bins_list.append(torch.autograd.Variable(torch.arange(min_range, max_range+spacing, spacing).unsqueeze(0).cuda(non_blocking=True, device = 0), requires_grad=False) )
+            if configs['use_binary_classifiers']:
+                linear_out_model = BinaryClassifiersOutput(self.current_n_channels, self.bins_list).cuda()
+            else:
+                linear_out_model = MeanVarLossOutput(self.current_n_channels, self.bins_list).cuda()
+        elif configs['use_log_quotient_output']:
+            linear_out_model = LogQuotientOutput(self.current_n_channels).cuda()
         else:
-            linear_out_model = nn.Linear(self.current_n_channels , len(labels_columns)).cuda()
-
+            linear_out_model = CommonLinearOutput(self.current_n_channels).cuda()
+        
         self.final_linear_layer.add_module("linear_out", linear_out_model)
         self.final_linear_layer.apply(weights_init)
+    
+    def set_bins(self, bins, index):
+        self.bins_list[index] = bins
+        if configs['use_mean_var_loss'] or configs['use_binary_classifiers']:
+            self.final_linear_layer.linear_out.set_bins(bins,index)
+    
     def forward(self, input):
-        if configs['use_mean_var_loss']:
-            x, logits, averages = self.final_linear_layer(input)
-        else:
-            x = self.final_linear_layer(input)
-            logits = None
-            averages = None
-
+        x, extra_outs = self.final_linear_layer(input)
         output_kind_each_output = [ configs['get_individual_output_kind'][name] for name in configs['get_labels_columns']]
         dic_output_kinds = {'linear':nn.Sequential(),'softplus':nn.Sequential(nn.Softplus().cuda()), 'sigmoid':nn.Sequential(nn.Sigmoid().cuda())}
         #add exception when output_kind_each_output cotains element not in dic_output_kinds.keys()
@@ -872,9 +1078,7 @@ class ModelLastLinearLayer(nn.Module):
         x = torch.sum(x, 2)
         if len(x.size())>2:
             x = x.squeeze(2)
-
-        return x, {'logits':logits, 'averages':averages}
-
+        return x, extra_outs
 
 class ModelFCPart(nn.Module):
     def __init__(self, current_n_channels):
@@ -889,10 +1093,24 @@ class ModelFCPart(nn.Module):
         self.fc_before_extra_inputs = torch.nn.Sequential()
         self.fc_after_extra_inputs = torch.nn.Sequential()
 
+        extra_input_size = 15 #TEMP replace 15 with 42 if the extrainput is the segmentation features
+        if configs['extra_fc_layers_for_extra_input']:
+            self.extra_fc_layers_for_extra_input = nn.Sequential(
+                        nn.BatchNorm1d(extra_input_size),
+                        nn.Linear(extra_input_size, configs['extra_fc_layers_for_extra_input_output_size']),
+                        nn.ReLU(),
+                        nn.Linear(configs['extra_fc_layers_for_extra_input_output_size'], configs['extra_fc_layers_for_extra_input_output_size']),
+                        nn.ReLU())
+            extra_input_size = configs['extra_fc_layers_for_extra_input_output_size']
+
         current_model = self.fc_before_extra_inputs
         for layer_i in range(configs['n_hidden_layers']):
             if (configs['layer_to_insert_extra_inputs']== layer_i) and configs['use_extra_inputs']:
-                self.current_n_channels = self.current_n_channels+15
+                if configs['normalize_extra_inputs_and_rest_with_bn']:
+                    self.bn_rest = nn.BatchNorm1d(self.current_n_channels)
+                    self.bn_extra_input = nn.BatchNorm1d(extra_input_size)
+                self.current_n_channels = self.current_n_channels+extra_input_size
+                #self.current_n_channels = extra_input_size #TEMP remove; for when testing using only the extra inputs
                 current_model = self.fc_after_extra_inputs
             if configs['use_batchnormalization_hidden_layers']:
                 current_model.add_module("bn_"+str(layer_i),torch.nn.BatchNorm1d(self.current_n_channels).cuda())
@@ -903,20 +1121,31 @@ class ModelFCPart(nn.Module):
             current_model.add_module("nonlinearity_"+str(layer_i),activation_function)
             self.current_n_channels = configs['channels_hidden_layers']
 
+
+
         if configs['use_extra_inputs'] and (configs['layer_to_insert_extra_inputs']==(configs['n_hidden_layers']+1)):
-            self.current_n_channels = self.current_n_channels+15
+            if configs['normalize_extra_inputs_and_rest_with_bn']:
+                self.bn_rest = nn.BatchNorm1d(self.current_n_channels)
+                self.bn_extra_input = nn.BatchNorm1d(extra_input_size)
+            self.current_n_channels = self.current_n_channels+extra_input_size
+            #self.current_n_channels = extra_input_size #TEMP remove
             current_model = self.fc_after_extra_inputs
 
         if configs['use_extra_inputs'] and configs['layer_to_insert_extra_inputs']>(configs['n_hidden_layers']+1):
             raise_with_traceback(ValueError("configs['layer_to_insert_extra_inputs'] ("+configs['layer_to_insert_extra_inputs']+") is set to bigger than configs['n_hidden_layers']+1 ("+configs['n_hidden_layers']+1 +")"))
-
         self.fc_after_extra_inputs.apply(weights_init)
         self.fc_before_extra_inputs.apply(weights_init)
+
 
     def forward(self, input, extra_fc_input = None):
         x = self.fc_before_extra_inputs(input)
         if extra_fc_input is not None:
-            x = torch.cat((extra_fc_input,x),1)
+            if configs['extra_fc_layers_for_extra_input']:
+                extra_fc_input = self.extra_fc_layers_for_extra_input(extra_fc_input)
+            if configs['normalize_extra_inputs_and_rest_with_bn']:
+                x = self.bn_rest(x)
+                extra_fc_input = self.bn_extra_input(extra_fc_input)
+            x = torch.cat((extra_fc_input,x),1) #extra_fc_input #torch.cat((extra_fc_input,x),1) #TEMP
         x = self.fc_after_extra_inputs(x)
         return x, {'ws':None,'vs':None}
 
@@ -1048,7 +1277,10 @@ def get_model(num_ftrs):
     else:
         outmodel = NonDataParallel(outmodel).cuda()
     if configs['load_model']:
-        outmodel.load_state_dict(torch.load('models/'+configs['prefix_model_to_load']+'model' + configs['model_to_load'] + '_0'))
+        state_to_load = torch.load(configs['local_directory'] + '/models/'+configs['prefix_model_to_load']+'model' + configs['model_to_load'] + '_0')
+        #state_to_load['module.final_layers.final_linear.final_linear_layer.linear_out.linear.weight'] = torch.cat([state_to_load['module.final_layers.final_linear.final_linear_layer.linear_out.linear.weight'], torch.zeros_like(state_to_load['module.final_layers.final_linear.final_linear_layer.linear_out.linear.weight'])[0:1, :]], dim = 0)
+        #state_to_load['module.final_layers.final_linear.final_linear_layer.linear_out.linear.bias'] = torch.cat([state_to_load['module.final_layers.final_linear.final_linear_layer.linear_out.linear.bias'], torch.zeros_like(state_to_load['module.final_layers.final_linear.final_linear_layer.linear_out.linear.bias'])[0:1]], dim = 0)
+        outmodel.load_state_dict(state_to_load)
     return outmodel
 
 class Reference:
@@ -1262,7 +1494,7 @@ class CheXNet(nn.Module):
                 if self.model.transform_input:
                     x[:, 0] = -(-x[:, 0] * (0.229 / 0.5) + (0.485 - 0.5) / 0.5) #TEMP: corrrection because input is inversed
                     x[:, 1] = -(-x[:, 1] * (0.224 / 0.5) + (0.456 - 0.5) / 0.5) #TEMP: corrrection because input is inversed
-                    x[:, 2] = -(-x[:, 2] * (0.225 / 0.5) + (0.406 - 0.5) / 0.5) #TEMP: corrrection because input is inversed 
+                    x[:, 2] = -(-x[:, 2] * (0.225 / 0.5) + (0.406 - 0.5) / 0.5) #TEMP: corrrection because input is inversed
                 x = self.model.Conv2d_1a_3x3(x)
                 x = self.model.Conv2d_2a_3x3(x)
                 x = self.model.Conv2d_2b_3x3(x)
@@ -1284,7 +1516,7 @@ class CheXNet(nn.Module):
                 #print(x.size())
             elif self.architecture=='densenet' or self.architecture=='vgg' or self.architecture=='alexnet' or self.architecture=='squeezenet':
                 x = self.model.features(x)
-                #x = F.relu(x, inplace=True) # should I always have this relu on?
+                #x = F.relu(x, inplace=True) # TODO: should I always have this relu on?
 
             x = self.get_classifier()(x)
         else:
@@ -1453,3 +1685,65 @@ def weights_init(m):
             pass
         else:
             raise_with_traceback(ValueError('configs["bias_initialization"] was set to an invalid value: ' + configs["bias_initialization"]))
+
+'''
+ACTIVATION = nn.ReLU
+
+class Identity(nn.Module):
+
+    def forward(self, x):
+        return x
+
+def conv2d_block(in_channels, out_channels, kernel=3, stride=1, padding=1, activation=ACTIVATION):
+    return nn.Sequential(
+        nn.Conv2d(in_channels, out_channels, kernel, stride=stride, padding=padding),
+        activation(),
+    )
+
+class C3DFCNout(nn.Module):
+    def __init__(self, n_channels=1, init_filters=16, dimensions=2, batch_norm=False):
+        super(C3DFCNout, self).__init__()
+        self.cnn = nn.ModuleList([C3DFCN(n_channels, init_filters, dimensions, batch_norm)])
+        self.stn = nn.Sequential()
+        self.segmentation = nn.Sequential()
+        self.final_layers = nn.Sequential()
+        
+    def forward(self,x, a,b,c):
+        x = x[:,0:1,:,:]
+        x = image_preprocessing.BatchUnNormalizeTensor([0.485], [0.229])(x)
+        x = (x - 0.5)*2
+        x = self.cnn[0](x)
+        x = nn.Softplus()(x-50)*0.7
+        x = torch.cat([x.unsqueeze(1),x.unsqueeze(1)], dim = 1)
+        return x, {}
+
+class C3DFCN(nn.Module):
+    def __init__(self, n_channels=1, init_filters=16, dimensions=2, batch_norm=False):
+        super(C3DFCN, self).__init__()
+        nf = init_filters
+        conv_block = conv2d_bn_block if batch_norm else conv2d_block
+        max_pool = nn.MaxPool2d if int(dimensions) is 2 else nn.MaxPool3d
+        self.encoder = nn.Sequential(
+            conv_block(n_channels, nf),
+            max_pool(2),
+            conv_block(nf, 2*nf),
+            max_pool(2),
+            conv_block(2*nf, 4*nf),
+            conv_block(4*nf, 4*nf),
+            max_pool(2),
+            conv_block(4*nf, 8*nf),
+            conv_block(8*nf, 8*nf),
+            max_pool(2),
+            conv_block(8*nf, 16*nf),
+            conv_block(16*nf, 16*nf),
+            conv_block(16*nf, 16*nf),
+        )
+        self.classifier = nn.Sequential(
+            conv_block(16*nf, 1, kernel=1, activation=Identity),
+        )
+
+    def forward(self, x):
+        x = self.encoder(x)
+        x = self.classifier(x)
+        return x.view(x.size(0), -1).mean(1)
+'''

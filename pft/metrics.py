@@ -43,11 +43,11 @@ def get_plot_value(values, all_true_values, name, use_true = False):
 
 def plot_results(y_corr, y_pred, y_corr_all, train_string, is_error_plot = False):
     markers = ['b.','g.', 'r.', 'c.', 'm.', 'y.', 'k.', 'b>', 'g>','r>']
-    prettify_name = {'fvc_pred':'Predicted FVC', 'fev1_pred':'Predicted FEV1', 'fev1fvc_pred':'Predicted FEV1/FVC', 
-                     'fev1_predrug':'Pre-drug FEV1', 'fvc_predrug':'Pre-drug FVC', 'fev1fvc_predrug':'Pre-drug FEV1/FVC', 
+    prettify_name = {'fvc_pred':'Predicted FVC', 'fev1_pred':'Predicted FEV1', 'fev1fvc_pred':'Predicted FEV1/FVC',
+                     'fev1_predrug':'Pre-drug FEV1', 'fvc_predrug':'Pre-drug FVC', 'fev1fvc_predrug':'Pre-drug FEV1/FVC',
                      'fev1_ratio':'Pre-drug/Predicted FEV1', 'fvc_ratio':'Pre-drug/Predicted FVC', 'fev1fvc_ratio':'Pre-drug/Predicted FEV1/FVC',
                        'fvc_diff':'Residual FVC', 'fev1_diff':'Residual FEV1'}
-    
+
     for i, plot_list in enumerate(configs['pft_plot_columns']):
         plot_var_for_legend = []
         name_var_for_legend = []
@@ -100,10 +100,10 @@ def perf_measure(y_actual, y_hat):
     tn = np.sum(np.equal(diff, 0), axis = 0)-tp
 
     return {'tp':tp,'fp': fp, 'fn': fn, 'tn':tn}
-  
+
 def sum_dictionaries_by_key(x,y):
     return {k: x.get(k, 0) + y.get(k, 0) for k in set(x) | set(y)}
-  
+
 def get_precision_recall_from_dictionary(d):
     try:
         precision_copd = d['tp']/float(d['tp']+d['fp'])
@@ -135,7 +135,7 @@ def get_precision_recall_from_dictionary(d):
         f1score_noncopd = 0
     accuracy = (d['tp']+d['tn'])/float(d['tp']+d['fp']+d['fn']+d['tn'])
     return {'precision':precision_copd, 'recall':recall_copd, 'f1score':f1score_copd, 'precision_noncopd':precision_noncopd, 'recall_noncopd':recall_noncopd, 'f1score_noncopd':f1score_noncopd, 'accuracy': accuracy}
-  
+
 def r2(y_corr, y_pred):
     y_corr_mean = np.mean(y_corr)
     sstot = np.sum(np.square(y_corr-y_corr_mean))
@@ -144,7 +144,7 @@ def r2(y_corr, y_pred):
 
 def get_copd_diagnose(fev1fvc_predrug):
     return (fev1fvc_predrug< 0.7)*1
-    
+
 def get_gold(fev1_ratio, fev1fvc_predrug):
     return (fev1fvc_predrug<0.7)*(1+(fev1_ratio<0.8)+(fev1_ratio<0.5)+(fev1_ratio<0.3))
 
@@ -183,19 +183,19 @@ def report_final_results(y_corr , y_pred, y_corr_all, train):
     #absolutes_and_important_ratios_plot_calc(y_pred, y_corr_all, 'fev1_ratio')
     plot_results(y_corr, y_pred, y_corr_all, train_string)
     #plot_results(y_corr, y_pred, y_corr_all, train_string, is_error_plot = True)
-        
+
     regression_metrics = {}
     correlations = {}
     output_variables = list(set(sum(configs['pft_plot_columns'],[])))
     accuracies = {}
-    
+
     if ('fev1_ratio' in configs['get_labels_columns'] or 'fev1_predrug' in configs['get_labels_columns']) and ('fev1fvc_predrug' in configs['get_labels_columns'] or ('fev1_predrug' in configs['get_labels_columns'] and 'fvc_predrug' in configs['get_labels_columns'])):
-        accuracies['confusion_gold'] = sklearn.metrics.confusion_matrix(get_gold(absolutes_and_important_ratios_plot_calc(y_corr, y_corr_all, 'fev1_ratio'), 
-                                                                                 absolutes_and_important_ratios_plot_calc(y_corr, y_corr_all, 'fev1fvc_predrug')), 
-                                                                        get_gold(absolutes_and_important_ratios_plot_calc(y_pred, y_corr_all, 'fev1_ratio'), 
+        accuracies['confusion_gold'] = sklearn.metrics.confusion_matrix(get_gold(absolutes_and_important_ratios_plot_calc(y_corr, y_corr_all, 'fev1_ratio'),
+                                                                                 absolutes_and_important_ratios_plot_calc(y_corr, y_corr_all, 'fev1fvc_predrug')),
+                                                                        get_gold(absolutes_and_important_ratios_plot_calc(y_pred, y_corr_all, 'fev1_ratio'),
                                                                                  absolutes_and_important_ratios_plot_calc(y_pred, y_corr_all, 'fev1fvc_predrug')))
     if len(configs['get_labels_columns_gold'])>0:
-        accuracies['confusion_gold'] = sklearn.metrics.confusion_matrix(absolutes_and_important_ratios_plot_calc(y_corr, y_corr_all, 'gold'), 
+        accuracies['confusion_gold'] = sklearn.metrics.confusion_matrix(absolutes_and_important_ratios_plot_calc(y_corr, y_corr_all, 'gold'),
                                                                         np.clip(np.rint(absolutes_and_important_ratios_plot_calc(y_pred, y_corr_all, 'gold')), a_min = 0, a_max = 5))
     for k in range(len(output_variables)):
         name = output_variables[k]
@@ -206,11 +206,14 @@ def report_final_results(y_corr , y_pred, y_corr_all, train):
         #print('numpy: ' + str(r2s[name]))
         #print(this_y_corr)
         #print(this_y_pred)
-        pearson, pvalue = scipy.stats.pearsonr(this_y_corr, this_y_pred)
+        try:
+            pearson, pvalue = scipy.stats.pearsonr(this_y_corr, this_y_pred)
+        except FloatingPointError:
+            pearson, pvalue = None, None
         regression_metrics[name]['correlation statistical test'] = {'pearson':pearson, 'pvalue':pvalue}
         if name == 'fev1fvc_predrug':
-            accuracies['copd_from_pft'] = get_accuracies(get_copd_diagnose(this_y_corr),  get_copd_diagnose(this_y_pred)) 
+            accuracies['copd_from_pft'] = get_accuracies(get_copd_diagnose(this_y_corr),  get_copd_diagnose(this_y_pred))
     logging.info('regression_metrics: ' + str(regression_metrics))
     if len(configs['get_labels_columns_copd'])>0:
-        accuracies[configs['get_labels_columns_copd'][0]] = get_accuracies(absolutes_and_important_ratios_plot_calc(y_corr, y_corr_all, 'copd') ,  absolutes_and_important_ratios_plot_calc(y_pred, y_corr_all, 'copd')) 
+        accuracies[configs['get_labels_columns_copd'][0]] = get_accuracies(absolutes_and_important_ratios_plot_calc(y_corr, y_corr_all, 'copd') ,  absolutes_and_important_ratios_plot_calc(y_pred, y_corr_all, 'copd'))
     logging.info('accuracy: ' + str(accuracies))

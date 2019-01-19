@@ -5,7 +5,7 @@ dirFiles = os.listdir('/home/sci/ricbl/Documents/projects/temp_radiology/radiolo
 dirFiles.sort()
 foundStart = False
 for filename in dirFiles:
-    if filename == 'log20180926-091332-6366.txt':
+    if filename == 'log20181120-143836-5141.txt':
         foundStart = True
     if filename == 'save':
         foundStart = False
@@ -23,13 +23,13 @@ for filename in dirFiles:
             except IndexError:
                 pass
         timestamp = lineList[line_model_to_load].split(':')[-1][1:-1]
-        #dd_train = 180
+        dd_train = 180
         #{'2915':2,'7273':2,'1714':2,'6025':2,'1573':2,
         #            '7824':10,'6055':10,'5579':10,'1558':10,'1217':10,
         #            '5473':180,'5560':180,'3890':180,'1764':180,'1660':180}[timestamp[-4:]]
-        dd_train = {'7848':2,'9895':2,'7256':2,'5297':2,'3377':2,
-                    '9825':10,'4255':10,'8446':10,'6772':10,'2271':10,
-                    '1256':180,'9432':180,'7222':180,'9156':180,'1413':180}[timestamp[-4:]]
+        # dd_train = {'7848':2,'9895':2,'7256':2,'5297':2,'3377':2,
+        #            '9825':10,'4255':10,'8446':10,'6772':10,'2271':10,
+        #            '1256':180,'9432':180,'7222':180,'9156':180,'1413':180}[timestamp[-4:]]
         dd_test = int(lineList[line_dd_test].split(':')[-1][1:-1])
         dict2str = ''
         for i in range(0,6):

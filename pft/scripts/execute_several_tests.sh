@@ -44,11 +44,12 @@
 #python train.py -c 2 -d 180 -m 20180919-135849-1764
 #python train.py -c 2 -d 180 -m 20180919-135904-1660
 
-python train.py -c 2 -d 180 -m 20180923-235804-1256
-python train.py -c 2 -d 180 -m 20180924-000537-9432
-python train.py -c 2 -d 180 -m 20180924-000544-7222
-python train.py -c 2 -d 180 -m 20180924-000605-9156
-python train.py -c 2 -d 180 -m 20180924-000615-1413
+# python train.py -c 2 -d 180 -m 20180923-235804-1256
+# python train.py -c 2 -d 180 -m 20180924-000537-9432
+# python train.py -c 2 -d 180 -m 20180924-000544-7222
+# python train.py -c 2 -d 180 -m 20180924-000605-9156
+# python train.py -c 2 -d 180 -m 20180924-000615-1413
+
 #python train.py -c 2 -d 180 -m 20180925-151236-7848
 #python train.py -c 2 -d 180 -m 20180925-150657-9895
 #python train.py -c 2 -d 180 -m 20180925-150659-7256
@@ -89,3 +90,9 @@ python train.py -c 2 -d 180 -m 20180924-000615-1413
 # python train.py -c 2 -d 2 -m 20180924-201506-8446
 # python train.py -c 2 -d 2 -m 20180924-201540-6772
 # python train.py -c 2 -d 2 -m 20180924-201602-2271
+
+python train.py -c 2 -d 180 -m 20181120-110708-1290
+python train.py -c 2 -d 180 -m 20181120-111213-3603
+python train.py -c 2 -d 180 -m 20181120-111304-6818
+python train.py -c 2 -d 180 -m 20181120-111351-4099
+python train.py -c 2 -d 180 -m 20181120-112218-7761
