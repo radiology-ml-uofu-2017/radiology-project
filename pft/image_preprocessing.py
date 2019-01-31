@@ -10,8 +10,12 @@ import skimage
 from scipy.ndimage.interpolation import rotate
 from skimage.filters import rank
 from skimage.morphology import disk
-#import cv2
 import torchvision
+import math
+import time
+from configs import configs
+if not configs['use_random_crops']:
+    import cv2
 
 class UnNormalizeNumpy(object):
     def __init__(self, mean, std):
@@ -123,10 +127,12 @@ class RandomScaleAugmentationNumpy(object):
         self.scale_range = scale_range
 
     def __call__(self, image):
-        chosen_scale = self.scale_range[0] + np.random.rand()*self.scale_range[1]
+        chosen_scale = self.scale_range[0] + np.random.rand()*(self.scale_range[1]-self.scale_range[0])
+        image = np.transpose(image, (1,2,0))
         image_2 = skimage.transform.rescale(image, (chosen_scale, chosen_scale), mode = 'edge', preserve_range =True)
         image_2 = crop_or_pad_to(image_2, image.shape)
-        return image_2.astype(float)
+        to_return = np.transpose(image_2.astype(float), (2,0,1))
+        return to_return
 
     def __repr__(self):
         return self.__class__.__name__ + '()'
@@ -141,10 +147,11 @@ class RandomRotationAugmentationNumpy(object):
         image = ((image - image_min)/(image_max-image_min)).astype(np.float)
         chosen_rotation = self.rotation_range[0] + np.random.rand()*(self.rotation_range[1]-self.rotation_range[0])
 
-        image_2 = np.transpose(skimage.transform.rotate(np.transpose(image, (1,2,0)), chosen_rotation, clip = False,  preserve_range=True, cval = 1.0), (2,0,1))
+        image_2 = np.transpose(skimage.transform.rotate(np.transpose(image, (1,2,0)), chosen_rotation, clip = False,  preserve_range=True, cval = 0.0), (2,0,1))
 
         image_2 = (image_2)*(image_max-image_min)+image_min
-        return image_2.astype(np.float)
+        to_return = image_2.astype(np.float)
+        return to_return
 
     def __repr__(self):
         return self.__class__.__name__ + '()'
@@ -154,13 +161,18 @@ class RandomGammaAugmentationNumpy(object):
         self.gamma_range = gamma_range
 
     def __call__(self, image):
-        chosen_gamma = self.gamma_range[0] + np.random.rand()*self.gamma_range[1]
+        A = self.gamma_range[0]
+        B = 2*math.log10(1/A)
+        chosen_gamma = A*10**(B*np.random.rand())
+        #chosen_gamma = self.gamma_range[0] + np.random.rand()*(self.gamma_range[1]-self.gamma_range[0])
+        #chosen_gamma = 1.0
         image_min = np.min(image)
         image_max = np.max(image)
         image = (image - image_min)/(image_max-image_min)
-        image_2 = skimage.exposure.adjust_gamma(image, chosen_gamma)
+        image_2 = image**chosen_gamma# skimage.exposure.adjust_gamma(image, chosen_gamma)
         image_2 = image_2*(image_max-image_min)+image_min
-        return image_2.astype(float)
+        to_return = image_2.astype(float)
+        return to_return 
 
     def __repr__(self):
         return self.__class__.__name__ + '()'
@@ -210,7 +222,6 @@ class ResizeNumpy():
             self.size = (int(size), int(size))
         else:
             self.size = size
-        print(self.size)
 
     def __call__(self, img):
         if img.shape[0]==3:
@@ -227,14 +238,14 @@ def crop_or_pad_to(image, final_size):
 
         padding_list = [[0,0]]*len(image.shape)
         if (-image.shape[i] + final_size[i])%2 == 0:
-            size_to_pad = [(-image.shape[i] + final_size[i])/2]*2
+            a = (-image.shape[i] + final_size[i])//2
+            size_to_pad = [a, a]
         else:
-            size_to_pad = [(-image.shape[i] + final_size[i]+1)/2 , (-image.shape[i] + final_size[i]-1)/2]
+            size_to_pad = [(-image.shape[i] + final_size[i]+1)//2 , (-image.shape[i] + final_size[i]-1)//2]
         padding_list[i] = size_to_pad
         padding_list = np.array(padding_list)
         if image.shape[i]<final_size[i]:
-
-            image = skimage.util.pad(image, padding_list, mode = 'constant')
+            image = skimage.util.pad(image, padding_list, mode = 'constant', constant_values  = 0.0)
         elif image.shape[i]>final_size[i]:
             image = skimage.util.crop(image,-padding_list,copy = True)
     return image

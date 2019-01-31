@@ -206,6 +206,15 @@ configs.add_variable('local_directory', '/home/sci/ricbl/Documents/projects/temp
 configs.add_variable('normalization_mean', [0.485, 0.456, 0.406])
 configs.add_variable('normalization_std', [0.229, 0.224, 0.225])
 configs.add_variable('post_binary_classifiers_fit_or_linear', 'fit')
+configs.add_variable('use_set_spiromics', False)
+configs.add_variable('use_transformation_loss', False)
+configs.add_variable('transformation_n_groups', 10)
+configs.add_variable('transformation_group_size', 10)
+configs.add_variable('chestxray14_path', '/usr/sci/projects/DeepLearning/Tolga_Lab/data_public/NIH_ChestX-Ray/images/all_images')
+configs.add_variable('transformation_loss_multiplier', 0.1)
+configs.add_variable('use_chexpert', False)
+configs.add_variable('chestxpert_path', '/usr/sci/projects/DeepLearning/Ricardo_Dataset/chexpert/CheXpert-v1.0-small/train')
+configs.add_variable('kind_of_transformation_loss', 'l2')
 
 #These are the main configs to change from default
 configs.add_variable('trainable_densenet', False)

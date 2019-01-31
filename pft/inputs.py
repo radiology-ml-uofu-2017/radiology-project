@@ -14,21 +14,27 @@ from PIL import Image
 import model_loading
 import torchvision
 import copy
+import glob
 from collections import OrderedDict
 try:
     import cPickle as pickle
 except:
     import _pickle as pickle
 
-
 percentage_labels = configs['percentage_labels']
 
 labels_columns = configs['get_labels_columns']
 
 def write_filenames():
-    pathFileTrain = '/home/sci/ricbl/Documents/projects/radiology-project/pft/train2.txt'
-    pathPngs = '/usr/sci/projects/DeepLearning/Tolga_Lab/Projects/Project_JoyceSchroeder/data/data_PFT/'
-    command = 'find ' + pathPngs + ' -type f -name "*.png" > ' + pathFileTrain
+    #pathFileTrain = '/home/sci/ricbl/Documents/projects/radiology-project/pft/train2.txt'
+    #pathPngs = '/usr/sci/projects/DeepLearning/Tolga_Lab/Projects/Project_JoyceSchroeder/data/data_PFT/'
+    #pathFileTrain = '/home/sci/ricbl/Documents/projects/temp_radiology/radiology-project/pft/train_spiro.txt'
+    #pathPngs = '/usr/sci/projects/DeepLearning/Tolga_Lab/Projects/Project_JoyceSchroeder/data/data_SPIROMICS/'
+    #command = 'find ' + pathPngs + ' -type f -name "*.png" > ' + pathFileTrain
+    pathFileTrain = '/home/sci/ricbl/Documents/projects/temp_radiology/radiology-project/pft/train_chexpert.txt'
+    pathPngs = configs['chestxpert_path']
+    command = 'find ' + pathPngs + ' -type f -name "*.jpg" > ' + pathFileTrain
+    
     os.system(command)
 
 def read_filename(line):
@@ -75,6 +81,26 @@ def read_filename(line):
     thisimage['position'] = position
     return thisimage
 
+def read_filename_chexpert(line):
+    thisimage = {}
+
+    lineItems = line.split()
+    thisimage['filepath'] = lineItems[0]
+    splitted_filepath = thisimage['filepath'].replace('\\','/').split("/")
+    splitted_ids = splitted_filepath[-1].replace('-','_').replace('.','_').split('_')
+    thisimage['subjectid'] = int(splitted_filepath[-3][7:])
+    thisimage['crstudy'] = int(splitted_filepath[-2][5:])
+    thisimage['scanid'] = int(splitted_ids[-3][4:])
+    position = splitted_ids[-2].upper()
+    if 'LATERAL' in position:
+        position = 'LAT'
+    elif 'FRONTAL' in position:
+        position = 'PA'
+    else:
+        raise_with_traceback(ValueError('Unknown position: '+position + ', for file: ' +  lineItems[0]))
+    thisimage['position'] = position
+    return thisimage
+    
 def read_filenames(pathFileTrain):
     listImage = []
     fileDescriptor = open(pathFileTrain, "r")
@@ -104,7 +130,7 @@ def get_name_pickle_file():
         #     size_all_images = '224_224'
     else:
         size_all_images = '7_7'
-    return '/home/sci/ricbl/Documents/projects/radiology-project/pft/images_'+''.join(configs['data_to_use'])+'_' +  size_all_images + '_prot3.pkl'
+    return configs['local_directory'] + '/images_' +''.join(configs['data_to_use'])+'_' +  size_all_images + '_prot3.pkl'
 
 class DatasetGenerator(Dataset):
     def __init__ (self, pathDatasetFile, transform = None, train = False, segmentation_features_file = None):
@@ -112,7 +138,7 @@ class DatasetGenerator(Dataset):
         self.listImage = pathDatasetFile
         if configs['trainable_densenet'] and configs['load_image_features_from_file']:
             if not configs['machine_to_use'] == 'titan':
-                folder = '/home/sci/ricbl/Documents/projects/temp_radiology/radiology-project/pft'
+                folder = configs['local_directory']
             else:
                 folder = '/scratch_ssd/ricbl/pft'
             if not configs['magnification_input']>1:
@@ -235,10 +261,141 @@ class DatasetGenerator(Dataset):
         else:
             extra_inputs = []
         #self.transform = transforms.ToTensor()
+        # torchvision.utils.save_image((imageData[0]+2.5)/5, 'testourpftft'+str(index)+'.png')
+        # torchvision.utils.save_image((imageData[1]+2.5)/5, 'testourpftlt'+str(index)+'.png')
+        # 1/0
+        #print('our pft stats:')
+        #print(torch.max(imageData[0]))
+        #print(torch.min(imageData[0]))
+        #print(torch.mean(imageData[0]))
         return imageData[0], ([] if len(self.listImage)==1 else imageData[1]), imageLabel, imageAllColumns, extra_inputs, filepath, vectorized_features, index
 
     def __len__(self):
         return self.n_images
+
+def get_transformations(original_image, transform):
+    images = []
+    if configs['use_transformation_loss']:
+        n_transformations = configs['transformation_group_size']
+    else:
+        n_transformations = 1
+    for i in range(n_transformations):
+        if transform is not None:
+            image = transform(original_image)
+        else:
+            image = original_image
+        images.append(-image.unsqueeze(0))
+    images = torch.cat(images, dim = 0)
+    if not configs['use_transformation_loss']:
+        images = images.squeeze(0)
+    return images
+
+class Chestxray14Dataset(Dataset):
+    def __init__(self, transform = None):
+        super(Chestxray14Dataset, self).__init__()
+        assert(configs['use_chexpert'] or not configs['use_lateral'])
+        self.files = []
+        if configs['use_chexpert']:
+            all_images = []
+            
+            fileDescriptor = open(configs['local_directory'] + '/' + 'train_chexpert.txt', "r")
+
+            line = True
+            while line:
+              line = fileDescriptor.readline()
+
+              #--- if not empty
+              if line:
+                  thisimage = read_filename_chexpert(line)
+                  if thisimage is not None:
+                      self.files.append(thisimage)
+            fileDescriptor.close()
+            
+            # for filename in glob.glob(configs['chestxpert_path']+'/patient*/study*/*.jpg'):
+            #     thisimage = read_filename_chexpert(filename)
+            #     if thisimage is not None:
+            #         self.files.append(thisimage)
+        else:
+            for filename in glob.glob(configs['chestxray14_path']+'/*.png'):
+                self.files.append({'filepath':filename})
+        if configs['use_random_crops']:
+            resize_size = 256
+        else:
+            resize_size = 224
+        normalize = transforms.Normalize(configs['normalization_mean'],
+                                    configs['normalization_std'])
+        list_pretransforms = [transforms.Resize(size=(resize_size)), transforms.ToTensor(), image_preprocessing.ToNumpy()]
+        if configs['use_chexpert']:
+                list_pretransforms = [image_preprocessing.CropBiggestCenteredInscribedSquare()] + list_pretransforms
+        self.transform = transforms.Compose(list_pretransforms + transform[0].transforms + [normalize])
+        self.files = pd.DataFrame(self.files)
+        if configs['use_chexpert']:
+            self.cases_to_use = pd.merge(self.files[self.files['position']=='LAT'], self.files[self.files['position']=='PA'], on=['subjectid', 'crstudy'], how = 'inner')  
+        else:
+            self.cases_to_use = self.files
+    def __getitem__(self, index):
+        
+        if not configs['use_chexpert']:
+            filepath_frontal = self.files.iloc[index,0]
+        else:
+            subjectid = self.cases_to_use['subjectid'].iloc[index]
+            crstudy = self.cases_to_use['crstudy'].iloc[index]
+            selected_cases = self.files[(self.files['subjectid'] == subjectid) & (self.files['crstudy'] == crstudy)]
+            filepath_lateral = selected_cases[self.files['position']=='LAT']['filepath'].iloc[0]
+            filepath_frontal = selected_cases[self.files['position']=='PA']['filepath'].iloc[0]
+        original_frontal_image = Image.open(filepath_frontal).convert('RGB') #TODO check if they are inversed; follow same steps to inverse as the rest; normalize the inversed and then negative
+        frontal_images = get_transformations(original_frontal_image, self.transform)
+        if configs['use_lateral']:
+            original_lateral_image = Image.open(filepath_lateral).convert('RGB') #TODO check if they are inversed; follow same steps to inverse as the rest; normalize the inversed and then negative
+            lateral_images = get_transformations(original_lateral_image, self.transform) #TODO: lateral getting flipped
+        else:
+            lateral_images = []
+        #torchvision.utils.save_image((frontal_images+2.5)/5, 'testchestxray14'+str(index)+'.png')
+        # torchvision.utils.save_image((frontal_images+2.5)/5, 'testchestxray14fr'+str(index)+'.png')
+        # torchvision.utils.save_image((lateral_images+2.5)/5, 'testchestxray14lt'+str(index)+'.png')
+        return frontal_images, lateral_images
+        
+    def __len__(self):
+        return len(self.cases_to_use)
+
+class _IteratorLoaderDifferentSizes:
+    def __init__(self, bigLoader, smallLoader):
+        self.bigLoader = bigLoader
+        self.smallLoader = smallLoader
+        if smallLoader.batch_size*len(smallLoader)> len(bigLoader)*bigLoader.batch_size:
+            raise_with_traceback(ValueError('bigLoader (first constructor argument) should be bigger than smallLoader (second argument).'))
+        if len(smallLoader)> len(bigLoader):
+            raise_with_traceback(ValueError('With these batch sizes, not all supervised examples will be applied in one epoch'))        
+        self.iterBigLoader = iter(self.bigLoader)
+        self.iterSmallLoader = iter(self.smallLoader)
+
+    def __iter__(self):
+        return self
+    
+    def nextI(self, this_iter):
+        return next(this_iter,None)
+    
+    def __next__(self):
+      
+        current_batch_BigLoader = self.nextI(self.iterBigLoader)
+        if current_batch_BigLoader is None:
+            raise StopIteration
+        
+        current_batch_SmallLoader= self.nextI(self.iterSmallLoader)
+        if current_batch_SmallLoader is None:
+            raise StopIteration
+        return current_batch_BigLoader, current_batch_SmallLoader
+      
+    next = __next__ 
+
+class loaderDifferentSizes:
+    def __init__(self, bigLoader, smallLoader):
+        self.bigLoader = bigLoader
+        self.smallLoader = smallLoader
+    
+    def __iter__(self):
+        self.iterator = _IteratorLoaderDifferentSizes(self.bigLoader, self.smallLoader)
+        return self.iterator
 
 def get_labels():
     #selects sets of data to use
@@ -311,6 +468,8 @@ def get_all_images():
         #selects sets of data to use
     if configs['use_set_29']:
         files_with_image_filenames = ['train.txt']
+    elif configs['use_set_spiromics']:
+        files_with_image_filenames = ['train_spiro.txt']
     else:
         #files_with_image_filenames = ['train2.txt']
         files_with_image_filenames = [ 'images' + str(dataset) + '.txt' for dataset in configs['data_to_use']]
@@ -333,7 +492,7 @@ def get_all_images():
 
         all_images = []
         for file_with_image_filenames in files_with_image_filenames:
-            all_images = all_images + read_filenames('/home/sci/ricbl/Documents/projects/radiology-project/pft/' + file_with_image_filenames)
+            all_images = all_images + read_filenames(configs['local_directory'] + '/' + file_with_image_filenames)
         n_images = len(all_images)
         all_images = pd.DataFrame(all_images)
 

@@ -2,7 +2,7 @@
 #SBATCH --time=0-30:00:00 # walltime, abbreviated by -t
 #SBATCH --nodes=1 # number of cluster nodes, abbreviated by -N
 #SBATCH --mincpus=8
-#SBATCH --gres=gpu:1
+#SBATCH --gres=gpu:1 
 #SBATCH -o dgx_log/slurm-%j.out-%N # name of the stdout, using the job number (%j) and the first node (%N)
 #SBATCH -e dgx_log/slurm-%j.err-%N # name of the stderr, using the job number (%j) and the first node (%N)
 #SBATCH --mem=25G
@@ -198,7 +198,7 @@ configs['magnification_input'] = 1#1/7.
 #configs['use_dropout_hidden_layers'] = 0.0
 # configs['use_half_lung'] = True
 
-#for gan visualization
+# #for gan visualization
 # configs['use_lateral'] = False
 # configs['use_horizontal_flip'] = False
 # configs['use_random_crops'] = True
@@ -215,6 +215,26 @@ configs['magnification_input'] = 1#1/7.
 # ##configs['BATCH_SIZE'] = 32
 # #configs['output_copd']=True
 # configs['individual_output_kind'] = {'copd':'linear'}
+
+#configs['use_set_spiromics'] = True
+
+
+# configs['use_transformation_loss'] = True
+# configs['use_extra_inputs'] = False
+# configs['transformation_loss_multiplier'] = 0.1
+# configs['chexnet_layers'] = 50
+# configs['chexnet_architecture'] =  'resnet'
+# configs['transformation_n_groups']= 10
+# configs['use_chexpert'] = False
+# configs['use_lateral'] = False
+# configs['BATCH_SIZE']=20
+# configs['use_horizontal_flip'] = False
+# #configs['use_random_crops'] = False
+# #configs['gamma_range_augmentation'] = [0.5,2]
+# # configs['degree_range_augmentation'] = [-7,7]
+# # configs['scale_range_augmentation'] = [0.9,1.1]
+# # configs['kind_of_transformation_loss'] = 'l1'
+
 
 configs.open_get_block_set()
 
@@ -336,6 +356,14 @@ def mutual_exclusivity_loss(ws):
     loss = -torch.mean(loss, dim = 0)
     return loss
 
+def transformation_loss(outputs, t_batch_size):
+    outputs = outputs.reshape(outputs.size()[0]//t_batch_size, t_batch_size, outputs.size()[1])
+    loss = torch.zeros(outputs.size()[0]).cuda()
+    for i in range(outputs.size(1)):
+        loss += torch.mean(torch.mean(torch.abs((outputs[:,i:i+1,:] - outputs))**(2 if (configs['kind_of_transformation_loss']=='l2') else 1), dim = 2), dim = 1)
+    loss = torch.mean(loss, dim = 0)/2.
+    return loss
+    
 def gate_uniformity_loss(ws):
     a = torch.sum(ws, dim = 0)
     if len(a.size())<2:
@@ -368,8 +396,12 @@ def run_epoch(loaders, model, criterion, optimizer, epoch=0, n_epochs=0, train=T
     lossMean = 0.0
     lossValNorm = 0.0
     y_corr, y_pred, y_corr_all = (np.empty([0,x]) for x in (len(labels_columns),len(labels_columns),len(configs['all_output_columns'])))
-
-    for i, (input1, input2, target, column_values, extra_inputs, filepath, segmentation_features, index ) in enumerate(loaders):
+    for i, loader_output in enumerate(loaders):
+        if configs['use_transformation_loss'] and train:
+            unsupervised_loader_output, supervised_loader_output = loader_output
+            input1, input2, target, column_values, extra_inputs, filepath, segmentation_features, index = supervised_loader_output
+        else:
+            input1, input2, target, column_values, extra_inputs, filepath, segmentation_features, index = loader_output
         if train:
             optimizer.zero_grad()
         # Forward pass
@@ -453,7 +485,16 @@ def run_epoch(loaders, model, criterion, optimizer, epoch=0, n_epochs=0, train=T
             loss += torch.mean(norm*orientation*direction)
         y_corr, y_pred, y_corr_all = (np.concatenate(x, axis = 0) for x in ((y_corr, target_var_fixed), (y_pred, output_var_fixed), (y_corr_all, all_target_var_fixed)))
 
-
+        if configs['use_transformation_loss'] and train:
+            input1_uns, input2_uns = unsupervised_loader_output
+            input1_uns = input1_uns.view([input1_uns.size()[0]*input1_uns.size()[1], input1_uns.size()[2], input1_uns.size()[3], input1_uns.size()[4]])
+            if configs['use_lateral']:
+                input2_uns = input2_uns.view([input2_uns.size()[0]*input2_uns.size()[1], input2_uns.size()[2], input2_uns.size()[3], input2_uns.size()[4]])
+            input1_var_uns, input2_var_uns, extra_inputs_var_uns = ((torch.autograd.Variable(var.cuda(non_blocking=True, device = 0), volatile=(not train))
+                                                   if (not isinstance(var,(list,))) else None) for var in (input1_uns, input2_uns,   []))
+            output_var, extra_outs = model(input1_var_uns, input2_var_uns, extra_inputs_var_uns, epoch)
+            loss += configs['transformation_loss_multiplier'] * transformation_loss(output_var, configs['transformation_group_size'])
+            #loss += configs['transformation_loss_multiplier'] * transformation_loss(extra_outs['averaged_spatial_output'], configs['transformation_group_size'])
         # Backward pass
         if train:
             loss.backward()
@@ -569,8 +610,10 @@ def load_training_pipeline(cases_to_use, all_images, all_labels, trainTransformS
             pickle.dump( testids, open( "./testsubjectids.pkl", "wb" ) )
             1/0
             '''
-
-            if configs['use_fixed_test_set']:
+            if configs['use_set_spiromics']:
+                testids = subjectids
+                valids = set([])
+            elif configs['use_fixed_test_set']:
                 try:
                     with open(configs['local_directory'] + '/testsubjectids.pkl') as f:
                         testids = pickle.load(f)
@@ -591,7 +634,9 @@ def load_training_pipeline(cases_to_use, all_images, all_labels, trainTransformS
                 prng = np.random.RandomState()
                 queue = prng.permutation(subjectids.shape[0])
                 testids = set(subjectids[queue[:int(0.2*subjectids.shape[0])]])
-
+            
+            
+            
             if configs['splits_to_use']=='include_val_in_training':
                 valids = set([])
             if configs['splits_to_use']=='include_test_in_training':
@@ -620,6 +665,12 @@ def load_training_pipeline(cases_to_use, all_images, all_labels, trainTransformS
         train_labels = train_labels[(train_labels['Date_Diff'] <= configs['maximum_date_diff'])]
 
         train_loader=get_loader(all_images, train_images, train_labels, trainTransformSequence, split = 'train')
+        
+        if configs['use_transformation_loss']:
+            unsupervised_dataset = inputs.Chestxray14Dataset(trainTransformSequence)
+            unsupervised_train_loader = DataLoader(unsupervised_dataset, batch_size=configs['transformation_n_groups'], shuffle=True, num_workers=NUM_WORKERS)
+            train_loader = inputs.loaderDifferentSizes(unsupervised_train_loader, train_loader)
+            
         if i == 0:
             eval_train_loader=get_loader(all_images, train_images, train_labels, testTransformSequence, split = 'eval_train', verbose = False)
 

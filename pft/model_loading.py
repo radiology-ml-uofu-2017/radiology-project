@@ -114,11 +114,13 @@ class FinalLayers(nn.Module):
 
     def forward(self, x, extra_fc_input, epoch ):
         x, spatial_outputs = self.spatial_part(x)
+        averaged_spatial_output = x
         #x, ws = self.fc_part(x, extra_fc_input, epoch)
         x, extra_outs = self.fc_part(x, extra_fc_input)
         x, extra_outs2 = self.final_linear(x)
         dict_out = utils.merge_two_dicts(extra_outs,extra_outs2)
         dict_out['spatial_outputs'] = spatial_outputs
+        dict_out['averaged_spatial_output'] = averaged_spatial_output
         return x, dict_out
 
 class SegmentationNetwork(nn.Module):
