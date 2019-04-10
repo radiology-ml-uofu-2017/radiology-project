@@ -37,14 +37,15 @@ class UnNormalizeNumpy(object):
         return return_tensor
 
 class BatchUnNormalizeTensor(object):
-    def __init__(self, mean, std, inversed_input_correction = True):
+    def __init__(self, mean, std, inversed_input_correction =  (configs['unary_input_multiplier'] == -1)):
         self.mean = mean
         self.std = std
         self.inversed_input_correction = inversed_input_correction
 
     def __call__(self, tensor):
-        mean = torch.FloatTensor(self.mean).cuda().view([1,-1,1,1])
-        std = torch.FloatTensor(self.std).cuda().view([1,-1,1,1])
+        
+        mean = torch.FloatTensor(self.mean).to(tensor.device).view([1,-1,1,1])
+        std = torch.FloatTensor(self.std).to(tensor.device).view([1,-1,1,1])
         if self.inversed_input_correction:
             to_return = (1-((-tensor*std)+mean)) #TEMP: corrrection because input is inversed
         else:
@@ -56,6 +57,18 @@ class BatchUnNormalizeTensor(object):
         assert(torch.max(to_return)<=1.0000001 and torch.min(to_return)>=-0.0000001)
         return to_return
 
+class BatchNormalizeTensorMinMax01(object):
+    def __init__(self):
+        pass
+    def __call__(self, tensor):
+        maxes, _ = torch.max(tensor.view([tensor.size(0), -1]), dim = 1)
+        mins, _ = torch.min(tensor.view([tensor.size(0), -1]), dim = 1)
+        if len(tensor.size()) <= 4:
+            to_return = (tensor - mins.unsqueeze(1).unsqueeze(1).unsqueeze(1))/(maxes.unsqueeze(1).unsqueeze(1).unsqueeze(1) - mins.unsqueeze(1).unsqueeze(1).unsqueeze(1))
+        elif len(tensor.size()) == 5:
+            to_return = (tensor - mins.unsqueeze(1).unsqueeze(1).unsqueeze(1).unsqueeze(1))/(maxes.unsqueeze(1).unsqueeze(1).unsqueeze(1).unsqueeze(1) - mins.unsqueeze(1).unsqueeze(1).unsqueeze(1).unsqueeze(1))
+        return to_return
+        
 class BatchNormalizeTensor(object):
     def __init__(self, mean, std, inversed_input_correction = False):
         self.mean = mean

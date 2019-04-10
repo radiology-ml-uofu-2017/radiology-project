@@ -17,7 +17,7 @@ def cmp(a, b):
   
 def compare_versions(version1, version2):
     def normalize(v):
-        return [int(x) for x in re.sub(r'(\.0+)*$','', v).replace("_",".").split(".")]
+        return [int(x) for x in re.sub(r'(\.0+)*$','', v).replace("_",".").replace('post2','2').split(".")]
     return cmp(normalize(version1), normalize(version2))
 
 def downsampling(x, size=None, scale_factor=None, mode='nearest'):

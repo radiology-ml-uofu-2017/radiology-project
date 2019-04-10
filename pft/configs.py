@@ -215,6 +215,14 @@ configs.add_variable('transformation_loss_multiplier', 0.1)
 configs.add_variable('use_chexpert', False)
 configs.add_variable('chestxpert_path', '/usr/sci/projects/DeepLearning/Ricardo_Dataset/chexpert/CheXpert-v1.0-small/train')
 configs.add_variable('kind_of_transformation_loss', 'l2')
+configs.add_variable('create_prediction_output_file', False)
+configs.add_variable('example_identifier_columns', ['scanid','subjectid','PFTExam_Global_ID','CRStudy_Global_ID', 'pftid', 'crstudy'])
+configs.add_variable('limit_training_examples', False)
+configs.add_variable('max_training_examples',1000)
+configs.add_variable('unary_input_multiplier', -1)
+configs.add_variable('load_dataset_to_memory', False)
+configs.add_variable('meta_file_root', '/usr/sci/projects/DeepLearning/Tolga_Lab/Projects/Project_JoyceSchroeder/data/data_PFT/MetaData/MetaData_')
+configs.add_variable('subtract_0.7', False)
 
 #These are the main configs to change from default
 configs.add_variable('trainable_densenet', False)
@@ -236,7 +244,10 @@ configs.add_variable('network_output_kind', 'linear') #'linear', 'softplus' , 's
 configs.add_variable('individual_output_kind',{'copd':'sigmoid'})
 
 # these configs are modified depending on model and machine
-configs.add_variable('machine_to_use', 'dgx' if socket.gethostname() == 'rigveda' else 'titan' if socket.gethostname() =='linux-55p6' or socket.gethostname() == 'titan' else 'other')
+configs.add_variable('machine_to_use', 'dgx' if socket.gethostname() == 'rigveda' 
+                                        else 'titan' if (socket.gethostname() =='linux-55p6' or socket.gethostname() == 'titan')   
+                                        else 'atlas' if (socket.gethostname() == 'atlas')   
+                                        else 'other')
 configs.add_variable('remove_pre_avg_pool', True)
 configs.add_variable('l2_reg_fc', 0.05)
 configs.add_variable('l2_reg_cnn', 0.0)
@@ -412,6 +423,36 @@ configs.add_predefined_set_of_configs('meanvar_loss', {'use_mean_var_loss': True
                                                 ,'initial_lr_cnn': 0.0001
                                                 ,'BATCH_SIZE': 64})
 
+configs.add_predefined_set_of_configs('vrgan_train', { 'use_lateral': False,
+                                             'use_horizontal_flip': False,
+                                             'use_random_crops': True,
+                                             'histogram_equalization': 'global',
+                                             'use_extra_inputs': False,
+                                             'individual_output_kind': 'copd':'linear',
+                                             'unary_input_multiplier': 1,
+                                             'remove_cases_more_one_image_per_position': False,
+                                             'maximum_date_diff':30,
+                                             'load_dataset_to_memory': True,
+                                             'network_output_kind': 'linear',
+                                             'n_hidden_layers': 0,
+                                             'use_dropout_hidden_layers': 0.0
+                                             })
+
+configs.add_predefined_set_of_configs('vrgan_eval', { 'use_lateral': False,
+                                             'use_horizontal_flip': False,
+                                             'use_random_crops': True,
+                                             'histogram_equalization': 'global',
+                                             'use_extra_inputs': False,
+                                             'individual_output_kind': 'copd':'linear',
+                                             'unary_input_multiplier': 1,
+                                             'remove_cases_more_one_image_per_position': False,
+                                             'maximum_date_diff':30,
+                                             'magnification_input': 4,
+                                             'network_output_kind': 'linear',
+                                             'n_hidden_layers': 0,
+                                             'use_dropout_hidden_layers': 0.0
+                                             })
+                                             
 configs.add_self_referenced_variable_from_dict('get_available_memory', 'machine_to_use',
                                       {'dgx': 15600-550-10,
                                        'titan':11700-2978,#11700-550-10,

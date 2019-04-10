@@ -8,6 +8,7 @@
 #SBATCH --mem=25G
 from future.utils import raise_with_traceback
 import torch
+
 import sys
 import os
 import time
@@ -35,6 +36,7 @@ from sklearn.neighbors.kde import KernelDensity
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+from collections import defaultdict
 
 try:
     # Python 2
@@ -59,7 +61,10 @@ parser.add_argument('-cuda','--cuda', action='store_true')
 parser.add_argument('-exp','--exp', required=False)
 parser.add_argument('-dit', '--d_iters', type=int, default=5)
 
-args = vars(parser.parse_args())
+if __name__ == "__main__":
+    args = vars(parser.parse_args())
+else:
+    args = defaultdict(lambda: None)
 
 configs.load_predefined_set_of_configs('cnn20180628') #'densenet', 'frozen_densenet', 'p1', 'fc20180524', 'cnn20180628'
 
@@ -115,17 +120,25 @@ configs['remove_repeated_images'] = True
 configs['remove_cases_more_one_image_per_position'] = True
 #configs['scheduler_to_use'] = 'steps'
 #configs['save_model']=True
+configs['splits_to_use'] = 'test_with_val'
+#configs['use_sigmoid_channel']=True
+
+#for testing
 # configs['load_model']=True
 # configs['skip_train']=True
 # configs['N_EPOCHS'] = 1
 # configs['prefix_model_to_load']='_'
-configs['splits_to_use'] = 'test_with_val'
 # configs['splits_to_use'] = 'test_with_test'
-#configs['use_sigmoid_channel']=True
-configs['model_to_load'] = '20180921-151934-5939'
-if args['model_to_load'] is not None:
-    configs['model_to_load'] = args['model_to_load']
-configs['override_max_axis_graph'] = 1.5
+# configs['model_to_load'] = '20180924-000615-1413'
+# #configs['model_to_load'] = '20180923-235804-1256'
+# if args['model_to_load'] is not None:
+#     configs['model_to_load'] = args['model_to_load']
+# configs['override_max_axis_graph'] = 1.5
+# configs['use_set_spiromics'] = True
+# configs['use_extra_inputs'] = True
+# configs['create_prediction_output_file'] = True
+# configs['unary_input_multiplier'] = 1
+
 #configs['relative_noise_to_add_to_label'] = 0.3
 configs['use_horizontal_flip'] = True
 #configs['use_random_crops'] = False
@@ -200,9 +213,10 @@ configs['magnification_input'] = 1#1/7.
 
 # #for gan visualization
 # configs['use_lateral'] = False
+# #configs['positions_to_use'] = ['LAT']
 # configs['use_horizontal_flip'] = False
 # configs['use_random_crops'] = True
-# configs['histogram_equalization']  ='none'
+# configs['histogram_equalization']  ='global'
 # configs['use_extra_inputs'] = False
 # #configs['save_model']=True
 # #configs['register_with_segmentation'] = True
@@ -215,25 +229,38 @@ configs['magnification_input'] = 1#1/7.
 # ##configs['BATCH_SIZE'] = 32
 # #configs['output_copd']=True
 # configs['individual_output_kind'] = {'copd':'linear'}
+# configs['unary_input_multiplier'] = 1
+# configs['remove_cases_more_one_image_per_position'] = False
+# configs['maximum_date_diff'] = 30
+# # configs['meta_file_root'] = '/mnt/y/DeepLearning/Tolga_Lab/Projects/Project_JoyceSchroeder/data/data_PFT/MetaData/MetaData_'
+# # configs['local_directory'] = '/mnt/z/Documents/projects/temp_radiology/radiology-project/pft'
+# #configs['use_set_spiromics'] = True
+# configs['load_dataset_to_memory'] = True
+# # configs['magnification_input'] = 4
+# configs['network_output_kind'] = 'linear'
+# #configs['chexnet_architecture'] = 'resnet'
+# # configs['chexnet_layers'] = 50
+# configs['n_hidden_layers'] = 0
+# configs['use_dropout_hidden_layers'] = 0.0
+# # configs['subtract_0.7'] = True
 
-#configs['use_set_spiromics'] = True
-
-
-# configs['use_transformation_loss'] = True
+# #semi-supervised
+# configs['use_transformation_loss'] = False
 # configs['use_extra_inputs'] = False
 # configs['transformation_loss_multiplier'] = 0.1
-# configs['chexnet_layers'] = 50
+# configs['chexnet_layers'] = 18
 # configs['chexnet_architecture'] =  'resnet'
 # configs['transformation_n_groups']= 10
 # configs['use_chexpert'] = False
 # configs['use_lateral'] = False
 # configs['BATCH_SIZE']=20
-# configs['use_horizontal_flip'] = False
+# #configs['use_horizontal_flip'] = False
 # #configs['use_random_crops'] = False
 # #configs['gamma_range_augmentation'] = [0.5,2]
 # # configs['degree_range_augmentation'] = [-7,7]
 # # configs['scale_range_augmentation'] = [0.9,1.1]
 # # configs['kind_of_transformation_loss'] = 'l1'
+# configs['limit_training_examples'] = True
 
 
 configs.open_get_block_set()
@@ -253,14 +280,15 @@ import time
 
 logging.info('Using PyTorch ' +str(torch.__version__))
 
-NUM_WORKERS = 0
+NUM_WORKERS = configs['BATCH_SIZE']
 # faster to have one worker and use non thread safe h5py to load preprocessed images
 # than other tested options
 
 if (not socket.gethostname() == 'rigveda') and (configs['machine_to_use'] == 'titan' or args['cvd'] is not None):
-    if args['cvd'] is None:
-        raise_with_traceback(ValueError('You should set Cuda Visible Devices (-c or --cvd) when using titan'))
-    os.environ['CUDA_VISIBLE_DEVICES'] = args['cvd']
+    # if args['cvd'] is None:
+    #     raise_with_traceback(ValueError('You should set Cuda Visible Devices (-c or --cvd) when using titan'))
+    #os.environ['CUDA_VISIBLE_DEVICES'] = args['cvd']
+    pass
 
 def meanvar_var_loss_calc(output_var, interm_probs_logits, model):
     bins = model.module.final_layers.final_linear.bins_list
@@ -396,12 +424,14 @@ def run_epoch(loaders, model, criterion, optimizer, epoch=0, n_epochs=0, train=T
     lossMean = 0.0
     lossValNorm = 0.0
     y_corr, y_pred, y_corr_all = (np.empty([0,x]) for x in (len(labels_columns),len(labels_columns),len(configs['all_output_columns'])))
+    example_identifiers = np.empty([0,len(configs['example_identifier_columns'])])
     for i, loader_output in enumerate(loaders):
+        
         if configs['use_transformation_loss'] and train:
             unsupervised_loader_output, supervised_loader_output = loader_output
-            input1, input2, target, column_values, extra_inputs, filepath, segmentation_features, index = supervised_loader_output
+            input1, input2, target, column_values, extra_inputs, filepath, segmentation_features, index, example_identifier = supervised_loader_output
         else:
-            input1, input2, target, column_values, extra_inputs, filepath, segmentation_features, index = loader_output
+            input1, input2, target, column_values, extra_inputs, filepath, segmentation_features, index, example_identifier = loader_output
         if train:
             optimizer.zero_grad()
         # Forward pass
@@ -484,7 +514,7 @@ def run_epoch(loaders, model, criterion, optimizer, epoch=0, n_epochs=0, train=T
             #print(orientation)
             loss += torch.mean(norm*orientation*direction)
         y_corr, y_pred, y_corr_all = (np.concatenate(x, axis = 0) for x in ((y_corr, target_var_fixed), (y_pred, output_var_fixed), (y_corr_all, all_target_var_fixed)))
-
+        example_identifiers = np.concatenate((example_identifiers, example_identifier), axis = 0)
         if configs['use_transformation_loss'] and train:
             input1_uns, input2_uns = unsupervised_loader_output
             input1_uns = input1_uns.view([input1_uns.size()[0]*input1_uns.size()[1], input1_uns.size()[2], input1_uns.size()[3], input1_uns.size()[4]])
@@ -524,7 +554,7 @@ def run_epoch(loaders, model, criterion, optimizer, epoch=0, n_epochs=0, train=T
 
     if utils.compare_versions(torch.__version__, '0.4.0')>=0:
         torch.set_grad_enabled(True)
-    return time_meter.value(), loss_meter.value(), np.atleast_1d(lossMean/lossValNorm), y_corr, y_pred, y_corr_all
+    return time_meter.value(), loss_meter.value(), np.atleast_1d(lossMean/lossValNorm), y_corr, y_pred, y_corr_all, example_identifiers
 
 def select_columns_one_table_after_merge(df, suffix, keep_columns=[]):
     to_select = [x for x in df if x.endswith(suffix)]+keep_columns
@@ -610,6 +640,23 @@ def load_training_pipeline(cases_to_use, all_images, all_labels, trainTransformS
             pickle.dump( testids, open( "./testsubjectids.pkl", "wb" ) )
             1/0
             '''
+            # if configs['use_gan_longitudinal']:
+            #     try:
+            #         with open(configs['local_directory'] + '/testsubjectids_gan_longitudinal.pkl') as f:
+            #             testids = pickle.load(f)
+            # 
+            #     except TypeError:
+            #         with open(configs['local_directory'] + '/testsubjectids_gan_longitudinal.pkl', 'rb') as f:
+            #             testids = pickle.load(f, encoding='latin1')
+            # 
+            #     try:
+            #         with open(configs['local_directory'] + '/validationsubjectids_gan_longitudinal.pkl') as f:
+            #             valids = pickle.load(f)
+            # 
+            #     except TypeError:
+            #         with open(configs['local_directory'] + '/validationsubjectids_gan_longitudinal.pkl', 'rb') as f:
+            #             valids = pickle.load(f, encoding='latin1')
+            # elif configs['use_set_spiromics']:
             if configs['use_set_spiromics']:
                 testids = subjectids
                 valids = set([])
@@ -643,19 +690,20 @@ def load_training_pipeline(cases_to_use, all_images, all_labels, trainTransformS
                 testids = set([])
             val_images = cases_to_use.loc[cases_to_use['subjectid'].isin(valids)]
             test_images = cases_to_use.loc[cases_to_use['subjectid'].isin(testids)]
-
             train_images = cases_to_use.loc[~cases_to_use['subjectid'].isin(testids) & ~cases_to_use['subjectid'].isin(valids)]
 
             assert(len(pd.merge(test_images, train_images, on=['subjectid'])) == 0)
             assert(len(pd.merge(val_images, train_images, on=['subjectid'])) == 0)
             assert(len(pd.merge(test_images, val_images, on=['subjectid'])) == 0)
             assert(len(test_images['subjectid'].unique()) + len(val_images['subjectid'].unique()) + len(train_images['subjectid'].unique()) == len(subjectids))
-
+            
             # train_images.to_csv('./train_cases.csv', sep=',')
             # val_images.to_csv('./val_cases.csv', sep=',')
             # test_images.to_csv('./test_cases.csv', sep=',')
             # 1/0
             assert(len(pd.merge(test_images, train_images, on=['subjectid'])) == 0)
+            if configs['limit_training_examples']:
+                train_images = train_images.loc[:configs['max_training_examples']]
 
         logging.info('total cases training: '+str(np.array(train_images).shape[0]))
         logging.info('total cases test: '+str(np.array(test_images).shape[0]))
@@ -796,7 +844,8 @@ def train(models, criterions, optimizers, schedulers, train_loaders, test_loader
     ys_corr_train, ys_pred_train, ys_corr_all_train, ys_corr_test, ys_pred_test, ys_corr_all_test = (np.empty([x,y,0]) for x, y in \
       ((train_dataset_size, len(labels_columns)),(train_dataset_size, len(labels_columns)),(train_dataset_size, len(configs['all_output_columns'])), \
         (test_dataset_size, len(labels_columns)),(test_dataset_size, len(labels_columns)), (test_dataset_size, len(configs['all_output_columns']))))
-
+    example_identifiers_trains = np.empty([train_dataset_size,len(configs['example_identifier_columns']),0])
+    example_identifiers_tests = np.empty([test_dataset_size,len(configs['example_identifier_columns']),0])
     if configs['training_pipeline']=='simple':
         concatenate_funcation = lambda x,y: y
     elif configs['training_pipeline']=='one_vs_all':
@@ -812,7 +861,7 @@ def train(models, criterions, optimizers, schedulers, train_loaders, test_loader
             optimizer = optimizers[i]
             eval_train_loader = eval_train_loaders[i]
             test_loader = test_loaders[i]
-            _, _, _, _, _, _ = run_epoch(
+            _, _, _, _, _, _, _ = run_epoch(
                               loaders=eval_train_loader,
                               model=model,
                               criterion=criterion,
@@ -836,7 +885,7 @@ def train(models, criterions, optimizers, schedulers, train_loaders, test_loader
             test_loader = test_loaders[i]
             eval_train_loader = eval_train_loaders[i]
             if not configs['skip_train']:
-                _, _, loss, _, _, _ = run_epoch(
+                _, _, loss, _, _, _, _ = run_epoch(
                     loaders=train_loader,
                     model=model,
                     criterion=criterion,
@@ -846,19 +895,19 @@ def train(models, criterions, optimizers, schedulers, train_loaders, test_loader
                     train=True
                     )
 
-            _, _, loss, y_corr_train, y_pred_train, y_corr_all_train = run_epoch(
-                  loaders=eval_train_loader,
-                  model=model,
-                  criterion=criterion,
-                  optimizer=None,
-                  epoch=epoch,
-                  n_epochs=n_epochs,
-                  train=False
-                )
+                _, _, loss, y_corr_train, y_pred_train, y_corr_all_train, example_identifiers_train = run_epoch(
+                      loaders=eval_train_loader,
+                      model=model,
+                      criterion=criterion,
+                      optimizer=None,
+                      epoch=epoch,
+                      n_epochs=n_epochs,
+                      train=False
+                    )
 
-            all_train_losses = np.concatenate((all_train_losses, loss), axis=0)
+                all_train_losses = np.concatenate((all_train_losses, loss), axis=0)
 
-            _, _, loss, y_corr_test, y_pred_test, y_corr_all_test = run_epoch(
+            _, _, loss, y_corr_test, y_pred_test, y_corr_all_test, example_identifiers_test = run_epoch(
                 loaders=test_loader,
                 model=model,
                 criterion=criterion,
@@ -867,11 +916,16 @@ def train(models, criterions, optimizers, schedulers, train_loaders, test_loader
                 n_epochs=n_epochs,
                 train=False
                 )
-
-            ys_corr_train, ys_pred_train, ys_corr_all_train, ys_corr_test, ys_pred_test, ys_corr_all_test = \
+            
+            if not configs['skip_train']:
+                ys_corr_train, ys_pred_train, ys_corr_all_train = \
                   (concatenate_funcation(x,y) for x,y in \
-                    ((ys_corr_train,y_corr_train),(ys_pred_train,y_pred_train),(ys_corr_all_train,y_corr_all_train), (ys_corr_test,y_corr_test),(ys_pred_test,y_pred_test), (ys_corr_all_test,y_corr_all_test)))
-
+                    ((ys_corr_train,y_corr_train),(ys_pred_train,y_pred_train),(ys_corr_all_train,y_corr_all_train)))
+                example_identifiers_trains = concatenate_funcation(example_identifiers_trains, example_identifiers_train)
+            ys_corr_test, ys_pred_test, ys_corr_all_test = \
+              (concatenate_funcation(x,y) for x,y in \
+                ((ys_corr_test,y_corr_test),(ys_pred_test,y_pred_test), (ys_corr_all_test,y_corr_all_test)))
+            example_identifiers_tests = concatenate_funcation(example_identifiers_tests, example_identifiers_test)
             if configs['use_lr_scheduler']:
                 if epoch >=configs['first_epoch_scheduler_step']:
                     schedulers[i].step(loss)
@@ -884,7 +938,8 @@ def train(models, criterions, optimizers, schedulers, train_loaders, test_loader
                 if is_best:
                     best_val_loss = np.average(all_val_losses)
                     save_model( models, 'best_epoch')
-        logging.info('Train loss ' + str(epoch) + '/' + str(n_epochs) + ': ' +str(np.average(all_train_losses)))
+        if not configs['skip_train']:
+            logging.info('Train loss ' + str(epoch) + '/' + str(n_epochs) + ': ' +str(np.average(all_train_losses)))
         logging.info('Val loss ' + str(epoch) + '/' + str(n_epochs) + ': '+str(np.average(all_val_losses)))
 
         if epoch==n_epochs or True:
@@ -893,10 +948,10 @@ def train(models, criterions, optimizers, schedulers, train_loaders, test_loader
             if configs['training_pipeline']=='ensemble':
                 ys_corr_train, ys_pred_train, ys_corr_all_train, ys_corr_test, ys_pred_test, ys_corr_all_test = \
                   ( np.mean(x, axis = 2) for x in (ys_corr_train,ys_pred_train,ys_corr_all_train, ys_corr_test,ys_pred_test, ys_corr_all_test))
+            if not configs['skip_train']:
+                metrics.report_final_results(ys_corr_train , ys_pred_train, ys_corr_all_train, example_identifiers_trains, train = True)
 
-            metrics.report_final_results(ys_corr_train , ys_pred_train, ys_corr_all_train, train = True)
-            metrics.report_final_results(ys_corr_test , ys_pred_test, ys_corr_all_test, train = False)
-
+            metrics.report_final_results(ys_corr_test , ys_pred_test, ys_corr_all_test, example_identifiers_tests, train = False)
 
 def merge_images_and_labels(all_images, all_labels):
 
@@ -983,7 +1038,7 @@ def main():
 
     logging.info('ended label loading')
     cases_to_use = merge_images_and_labels(all_images, all_labels)
-
+    
     models, criterions, optimizers, schedulers, train_loaders, test_loaders, eval_train_loaders = load_training_pipeline(cases_to_use, all_images, all_labels, trainTransformSequence, testTransformSequence, num_ftrs)
     if configs['create_csv_for_segmentation_features']:
         save_all_segmentation_features(train_loaders[0])

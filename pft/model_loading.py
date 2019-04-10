@@ -1119,7 +1119,9 @@ class ModelFCPart(nn.Module):
             current_model.add_module("drop_"+str(layer_i),nn.Dropout(p=configs['use_dropout_hidden_layers']).cuda())
             # On DGX, this next line, in the first iteration of the loop, is the one taking a long time (about 250s) in the .cuda() part.
             # probably because of some incompatibility between Cuda 9.0 and pytorch 0.1.12
+            start_time = time.time()
             current_model.add_module("linear_"+str(layer_i),nn.Linear(self.current_n_channels, configs['channels_hidden_layers'] ).cuda())
+            print('First cuda line took ' + str(time.time()-start_time) + 's to execute.')
             current_model.add_module("nonlinearity_"+str(layer_i),activation_function)
             self.current_n_channels = configs['channels_hidden_layers']
 
@@ -1280,6 +1282,9 @@ def get_model(num_ftrs):
         outmodel = NonDataParallel(outmodel).cuda()
     if configs['load_model']:
         state_to_load = torch.load(configs['local_directory'] + '/models/'+configs['prefix_model_to_load']+'model' + configs['model_to_load'] + '_0')
+        if 'module.final_layers.final_linear.final_linear_layer.linear_out.weight' in state_to_load.keys():
+            state_to_load['module.final_layers.final_linear.final_linear_layer.linear_out.linear.weight'] = state_to_load.pop('module.final_layers.final_linear.final_linear_layer.linear_out.weight')
+            state_to_load['module.final_layers.final_linear.final_linear_layer.linear_out.linear.bias'] = state_to_load.pop('module.final_layers.final_linear.final_linear_layer.linear_out.bias')
         #state_to_load['module.final_layers.final_linear.final_linear_layer.linear_out.linear.weight'] = torch.cat([state_to_load['module.final_layers.final_linear.final_linear_layer.linear_out.linear.weight'], torch.zeros_like(state_to_load['module.final_layers.final_linear.final_linear_layer.linear_out.linear.weight'])[0:1, :]], dim = 0)
         #state_to_load['module.final_layers.final_linear.final_linear_layer.linear_out.linear.bias'] = torch.cat([state_to_load['module.final_layers.final_linear.final_linear_layer.linear_out.linear.bias'], torch.zeros_like(state_to_load['module.final_layers.final_linear.final_linear_layer.linear_out.linear.bias'])[0:1]], dim = 0)
         outmodel.load_state_dict(state_to_load)

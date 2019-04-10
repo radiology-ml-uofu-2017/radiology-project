@@ -130,37 +130,71 @@ def get_name_pickle_file():
         #     size_all_images = '224_224'
     else:
         size_all_images = '7_7'
-    return configs['local_directory'] + '/images_' +''.join(configs['data_to_use'])+'_' +  size_all_images + '_prot3.pkl'
+    if configs['machine_to_use'] == 'titan':
+        folder = '/scratch_ssd/ricbl/pft'
+    elif configs['machine_to_use'] == 'atlas':
+        folder = '/scratch/ricbl/pft'
+    else:
+        folder = configs['local_directory']
+    return folder + '/images_' +''.join(configs['data_to_use'])+'_' +  size_all_images + '_prot3.pkl'
 
 class DatasetGenerator(Dataset):
     def __init__ (self, pathDatasetFile, transform = None, train = False, segmentation_features_file = None):
         super(DatasetGenerator, self).__init__()
         self.listImage = pathDatasetFile
-        if configs['trainable_densenet'] and configs['load_image_features_from_file']:
-            if not configs['machine_to_use'] == 'titan':
-                folder = configs['local_directory']
-            else:
-                folder = '/scratch_ssd/ricbl/pft'
-            if not configs['magnification_input']>1:
-                self.file = h5py.File(get_name_h5_file(), 'r')
-            else:
-                assert(configs['magnification_input']<=4)
-                self.file = h5py.File(folder + '/images_2012-20162017_1024_1024.prot3.h5', 'r') #'/scratch_ssd/ricbl/pft/images_2012-20162017_1024_1024.prot3.h5', 'r')
-
-            #much slower
-            #store = Store('all_images_224_224_prot2.2.h5df', mode="r")
-            #self.df1 = store["/frames/1"]
+        self.file = None
+        self.segmentation = None
         self.n_images = len(self.listImage[0])
         self.transform = transform
         self.train = train
-        if (configs['use_unet_segmentation'] or configs['register_with_segmentation'] or  configs['calculate_segmentation_features']) and configs['segmentation_in_loading']:
-            if configs['use_precalculated_segmentation_features']:
-                self.segmentation = h5py.File(segmentation_features_file, 'r')
-            else:
-                self.segmentation = model_loading.SegmentationNetwork().cuda()
+        self.load_images_from_file = configs['trainable_densenet'] and configs['load_image_features_from_file']
+        self.load_segmentation = (configs['use_unet_segmentation'] or configs['register_with_segmentation'] or  configs['calculate_segmentation_features']) and configs['segmentation_in_loading']
+        if self.load_images_from_file and self.file is None and configs['load_dataset_to_memory']:
+            self.load_h5py_file()
+            self.loaded_images = []
+            for i in range(len(self.listImage)):
+                self.loaded_images.append([configs['unary_input_multiplier']*self.file['dataset_1'][self.listImage[i]['preprocessed'].iloc[index],...].astype('float32') for index in range(self.n_images)])
+        
     #--------------------------------------------------------------------------------
+    def __del__(self):  
+        if self.file is not None:
+            self.file.close()
+            self.file = None
+            print('File closed')
+        if self.segmentation is not None:
+            self.segmentation.close()
+            self.segmentation = None
+        
+    def __delete__(self):  
+        if self.file is not None:
+            self.file.close()
+            self.file = None
+        if self.segmentation is not None:
+            self.segmentation.close()
+            self.segmentation = None
+        
+    def load_h5py_file(self):
+        if configs['machine_to_use'] == 'titan':
+            folder = '/scratch_ssd/ricbl/pft'
+        elif configs['machine_to_use'] == 'atlas':
+            folder = '/scratch/ricbl/pft'
+        else:
+            folder = configs['local_directory']
+        if not configs['magnification_input']>1:
+            self.file = h5py.File(get_name_h5_file(), 'r', swmr = True)
+        else:
+            assert(configs['magnification_input']<=4)
+            self.file = h5py.File(folder + '/images_2012-20162017_1024_1024.prot3.h5', 'r', swmr = True)
 
     def __getitem__(self, index):
+        if self.load_images_from_file and self.file is None and not configs['load_dataset_to_memory']:
+            self.load_h5py_file()
+        
+        if self.load_segmentation and self.segmentation is None:
+            if configs['use_precalculated_segmentation_features']:
+                self.segmentation = h5py.File(segmentation_features_file, 'r', swmr = True)
+            else:
+                self.segmentation = model_loading.SegmentationNetwork().cuda()
         if not isinstance(index, int):
             index = int(index)
         imageData = []
@@ -178,10 +212,12 @@ class DatasetGenerator(Dataset):
                     #print(index)
                     #print(len(b))
                     #c = b.iloc[index]
-                    old_index = self.listImage[i]['preprocessed'].iloc[index]
-
-                    imageData.append(-self.file['dataset_1'][old_index,...].astype('float32')) #TEMP: corrrection because input is inversed
-
+                    
+                    if not configs['load_dataset_to_memory']:
+                        old_index = self.listImage[i]['preprocessed'].iloc[index]
+                        imageData.append(configs['unary_input_multiplier']*self.file['dataset_1'][old_index,...].astype('float32')) #TEMP: corrrection because input is inversed
+                    else:
+                        imageData.append(self.loaded_images[i][index])
                     #much slower:
                     #examples_to_read = ['ind' + str(old_index)]
                     #imageData = self.df1.rows(examples_to_read).values.reshape(3,224,224)
@@ -251,6 +287,8 @@ class DatasetGenerator(Dataset):
         #plt.imshow(b)
         #plt.savefig('test.png')
         imageLabel= torch.FloatTensor(self.listImage[0][labels_columns].iloc[index])
+        if configs['subtract_0.7']:
+            imageLabel = (imageLabel - 0.7)/0.1
         if (configs['relative_noise_to_add_to_label'] is not None) and (self.train):
             imageLabel = torch.FloatTensor(np.random.normal(imageLabel, imageLabel * configs['relative_noise_to_add_to_label']))
         imageAllColumns= torch.FloatTensor(self.listImage[0][configs['all_output_columns']].iloc[index])
@@ -268,7 +306,14 @@ class DatasetGenerator(Dataset):
         #print(torch.max(imageData[0]))
         #print(torch.min(imageData[0]))
         #print(torch.mean(imageData[0]))
-        return imageData[0], ([] if len(self.listImage)==1 else imageData[1]), imageLabel, imageAllColumns, extra_inputs, filepath, vectorized_features, index
+        # if self.file is not None:
+        #     self.file.close()
+        #     self.file = None
+        #     print('File closed')
+        # if self.segmentation is not None:
+        #     self.segmentation.close()
+        #     self.segmentation = None
+        return imageData[0], ([] if len(self.listImage)==1 else imageData[1]), imageLabel, imageAllColumns, extra_inputs, filepath, vectorized_features, index, self.listImage[0][configs['example_identifier_columns']].iloc[index].values
 
     def __len__(self):
         return self.n_images
@@ -402,10 +447,17 @@ def get_labels():
     if configs['use_set_29']:
         all_labels = pd.read_csv('./labels.csv')
         all_labels['dataset'] = '2017'
+    elif configs['use_set_spiromics']:
+        all_labels = pd.read_csv('./SPIROMICS_PFTValuesAndInfo_No_PHI.csv')
+        all_labels['dataset'] = 'SPIROMICS'
     else:
-        file_root = '/usr/sci/projects/DeepLearning/Tolga_Lab/Projects/Project_JoyceSchroeder/data/data_PFT/MetaData/MetaData_'
-        file_end = {'2012-2016':'2012-2016/Chest_Xray_2012-2016_TJ_clean_ResearchID_PFTValuesAndInfo_No_PHI.csv', '2017':'2017/Chest_Xray_20180316_Clem_clean_ResearchID_PFTValuesAndInfo_noPHI.csv'}
-        all_labels = pd.concat([pd.read_csv(file_root + file_end[dataset]).assign(dataset=dataset) for dataset in configs['data_to_use']])
+        file_root = configs['meta_file_root']
+        #file_end = {'2012-2016':'2012-2016/Chest_Xray_2012-2016_TJ_clean_ResearchID_PFTValuesAndInfo_WithDate_No_PHI.csv', '2017':'2017/Chest_Xray_20180316_Clem_clean_ResearchID_PFTValuesAndInfo_WithDate_noPHI.csv'}
+        #all_labels = pd.concat([pd.read_csv(file_root + file_end[dataset]).assign(dataset=dataset) for dataset in configs['data_to_use']])
+        file_end = 'All/Chest_Xray_Main_TJ_clean_ResearchID_PFTValuesAndInfo_WithDate_NoPHI.csv'
+        all_labels = pd.read_csv(file_root + file_end) 
+        all_labels['dataset'] = all_labels.apply(lambda row: '2017' if row['PFT_DATE_YearOnly']==2017 else '2012-2016', axis=1)
+        all_labels = all_labels.loc[all_labels['dataset'].isin(configs['data_to_use'])]
     all_labels['fev1_diff'] = all_labels['Predicted FEV1'] - all_labels['Pre-Drug FEV1']
     all_labels['fvc_diff'] = all_labels['Predicted FVC'] - all_labels['Pre-Drug FVC']
 
@@ -416,15 +468,15 @@ def get_labels():
     all_labels.dropna(subset=['fvc_predrug'], inplace=True)
 
     all_labels['binary_gender'] = (all_labels['gender']=='Male')*1
-    all_labels.replace({'tobacco_status':{
+    
+    tobacco_status_categories = {
     'Quit':0,
     'Never':1,
     'Yes':2,
     'Not Asked':3,
-    'Passive':4,
-    'Former Smoker':5},
-    'smoking_tobacco_status':
-    {'Former Smoker':0,
+    'Passive':4}
+    
+    smoking_tobacco_status_categories = {'Former Smoker':0,
     'Never Smoker':1,
     'Current Every Day Smoker':2,
     'Passive Smoke Exposure - Never Smoker':3,
@@ -434,11 +486,12 @@ def get_labels():
     'Heavy Tobacco Smoker':7,
     'Unknown If Ever Smoked':5,
     'Smoker, Current Status Unknown':5}
-    }, inplace = True)
+    
+    all_labels.replace({'tobacco_status':tobacco_status_categories,
+    'smoking_tobacco_status': smoking_tobacco_status_categories}, inplace = True)
 
-    all_labels = pd.concat([all_labels,pd.get_dummies(all_labels['tobacco_status'], prefix='tobacco_status').astype('float')],axis=1)
-    all_labels = pd.concat([all_labels,pd.get_dummies(all_labels['smoking_tobacco_status'], prefix='smoking_tobacco_status').astype('float')],axis=1)
-
+    all_labels = pd.concat([all_labels,pd.get_dummies(all_labels['tobacco_status'], prefix='tobacco_status').T.reindex(['tobacco_status_' + str(value) for value in range(1+max(tobacco_status_categories.values()))]).T.fillna(0).astype('float')],axis=1)
+    all_labels = pd.concat([all_labels,pd.get_dummies(all_labels['smoking_tobacco_status'], prefix='smoking_tobacco_status').T.reindex(['smoking_tobacco_status_' + str(value) for value in range(1+max(smoking_tobacco_status_categories.values()))]).T.fillna(0).astype('float').astype('float')],axis=1)
     all_labels[percentage_labels] = all_labels[percentage_labels] /100.
 
     if configs['use_copd_definition_as_label']:
@@ -573,7 +626,7 @@ def get_images():
         if configs['scale_range_augmentation'] is not None:
             for a_list_transform in train_list_transforms:
                 a_list_transform += [image_preprocessing.RandomScaleAugmentationNumpy(configs['scale_range_augmentation'])]
-        if (not configs['use_random_crops']) or ( not (configs['magnification_input']==1)):
+        if (not configs['use_random_crops']) or ( not (configs['magnification_input']==1 or configs['magnification_input']==4)):
             if configs['chexnet_architecture']=='inception':
                 resize_size = 299
             else:

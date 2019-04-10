@@ -7,6 +7,7 @@ import logging
 import sklearn.metrics
 import scipy.stats
 import torch
+import pandas as pd
 
 # defining what variables are going to be ploted (plot_columns) and how they are calculated
 # using the variables present in labels_to_use
@@ -173,7 +174,11 @@ def get_last_layer_entropy(spatial_outputs):
     print(entropy)
     return entropy
 
-def report_final_results(y_corr , y_pred, y_corr_all, train):
+def report_final_results(y_corr , y_pred, y_corr_all, example_identifiers, train):
+    if configs['create_prediction_output_file']:
+        a = pd.DataFrame(data=np.concatenate([example_identifiers,y_pred, y_corr], axis = 1),    # values
+         columns=configs['example_identifier_columns'] + [column_name + '_predicted' for column_name in configs['get_labels_columns']] + [column_name + '_gt' for column_name in configs['get_labels_columns']])
+        a.to_csv('./predictions/prediction_output_file'+configs['timestamp']+'.csv', index = False)
     if train:
         train_string = 'train'
     else:
