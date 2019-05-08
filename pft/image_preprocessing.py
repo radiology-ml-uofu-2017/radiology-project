@@ -485,3 +485,11 @@ def preprocess_images_and_save(all_images, transformations, h5f):
     for index, row in all_images.iterrows():
         h5f['dataset_1'][index,...] = preprocess_image(row['filepath'], transformations)
     return h5f
+    
+def preprocess_images_and_save_with_dataset(dataset, h5f):
+    for index in range(len(dataset)):
+        print(index)
+        row = dataset[index]
+        h5f['frontal'][index,...] = row[0]
+        h5f['zoom'][index,...] = row[1]
+    return h5f

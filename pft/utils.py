@@ -145,7 +145,9 @@ class ReduceLROnPlateau(object):
             self._reduce_lr(epoch)
             self.cooldown_counter = self.cooldown
             self.num_bad_epochs = 0
-
+            return True
+        return False
+        
     def _reduce_lr(self, epoch):
         for i, param_group in enumerate(self.optimizer.param_groups):
             old_lr = float(param_group['lr'])

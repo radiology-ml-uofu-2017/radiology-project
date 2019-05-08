@@ -146,13 +146,16 @@ def r2(y_corr, y_pred):
 def get_copd_diagnose(fev1fvc_predrug):
     return (fev1fvc_predrug< 0.7)*1
 
+def get_restrictive_diagnose(fvc_ratio, fev1fvc_predrug):
+    return (fev1fvc_predrug> 0.7)*(fvc_ratio<0.8)
+
 def get_gold(fev1_ratio, fev1fvc_predrug):
     return (fev1fvc_predrug<0.7)*(1+(fev1_ratio<0.8)+(fev1_ratio<0.5)+(fev1_ratio<0.3))
 
 def get_accuracies(y_corr, y_pred):
     accuracies = {}
     accuracies['avg_precision'] = sklearn.metrics.average_precision_score(y_true = y_corr, y_score = y_pred)
-    accuracies['roc_auc'] = sklearn.metrics.roc_auc_score(y_true = y_corr, y_score = y_pred)
+    
     perfs = perf_measure(y_actual = y_corr, y_hat = (y_pred>0.5)*1)
     accuracies['perfs'] = perfs
     accuracies['scores'] = get_precision_recall_from_dictionary(perfs)
@@ -193,7 +196,12 @@ def report_final_results(y_corr , y_pred, y_corr_all, example_identifiers, train
     correlations = {}
     output_variables = list(set(sum(configs['pft_plot_columns'],[])))
     accuracies = {}
-
+    
+    if ('fvc_ratio' in configs['get_labels_columns'] or 'fvc_predrug' in configs['get_labels_columns']) and ('fev1fvc_predrug' in configs['get_labels_columns'] or ('fev1_predrug' in configs['get_labels_columns'] and 'fvc_predrug' in configs['get_labels_columns'])):
+        accuracies['accuracy_restrictive'] = get_accuracies(get_restrictive_diagnose(absolutes_and_important_ratios_plot_calc(y_corr, y_corr_all, 'fvc_ratio'), 
+                                                                      absolutes_and_important_ratios_plot_calc(y_corr, y_corr_all, 'fev1fvc_predrug')), 
+                                             get_restrictive_diagnose(absolutes_and_important_ratios_plot_calc(y_pred, y_corr_all, 'fvc_ratio'), 
+                                                                      absolutes_and_important_ratios_plot_calc(y_pred, y_corr_all, 'fev1fvc_predrug')))
     if ('fev1_ratio' in configs['get_labels_columns'] or 'fev1_predrug' in configs['get_labels_columns']) and ('fev1fvc_predrug' in configs['get_labels_columns'] or ('fev1_predrug' in configs['get_labels_columns'] and 'fvc_predrug' in configs['get_labels_columns'])):
         accuracies['confusion_gold'] = sklearn.metrics.confusion_matrix(get_gold(absolutes_and_important_ratios_plot_calc(y_corr, y_corr_all, 'fev1_ratio'),
                                                                                  absolutes_and_important_ratios_plot_calc(y_corr, y_corr_all, 'fev1fvc_predrug')),
@@ -218,6 +226,7 @@ def report_final_results(y_corr , y_pred, y_corr_all, example_identifiers, train
         regression_metrics[name]['correlation statistical test'] = {'pearson':pearson, 'pvalue':pvalue}
         if name == 'fev1fvc_predrug':
             accuracies['copd_from_pft'] = get_accuracies(get_copd_diagnose(this_y_corr),  get_copd_diagnose(this_y_pred))
+            accuracies['roc_auc'] = sklearn.metrics.roc_auc_score(y_true = get_copd_diagnose(this_y_corr), y_score = -this_y_pred)
     logging.info('regression_metrics: ' + str(regression_metrics))
     if len(configs['get_labels_columns_copd'])>0:
         accuracies[configs['get_labels_columns_copd'][0]] = get_accuracies(absolutes_and_important_ratios_plot_calc(y_corr, y_corr_all, 'copd') ,  absolutes_and_important_ratios_plot_calc(y_pred, y_corr_all, 'copd'))

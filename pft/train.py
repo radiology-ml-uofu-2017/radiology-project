@@ -211,7 +211,7 @@ configs['magnification_input'] = 1#1/7.
 #configs['use_dropout_hidden_layers'] = 0.0
 # configs['use_half_lung'] = True
 
-# #for gan visualization
+# # #for gan visualization
 # configs['use_lateral'] = False
 # #configs['positions_to_use'] = ['LAT']
 # configs['use_horizontal_flip'] = False
@@ -263,6 +263,60 @@ configs['magnification_input'] = 1#1/7.
 # configs['limit_training_examples'] = True
 
 
+
+# configs['unary_input_multiplier'] = 1
+# configs['save_model']=True
+# configs['BATCH_SIZE']=1
+#configs['multiplier_lr_scheduler']=0.5
+# configs['revert_model_lr_scheduler'] = True
+# configs['plateau_patience'] = 5
+# configs['first_epoch_scheduler_step'] = 10
+# configs['initial_lr_fc'] = 0.0005
+# configs['initial_lr_cnn'] = 0.0005
+#configs['use_amsgrad'] = True
+# configs['optimizer']='nesterov'
+# configs['initial_lr_fc'] = 0.1
+# configs['initial_lr_cnn'] = 0.1
+# configs['kind_of_loss'] = 'l2'
+# configs['use_extra_inputs'] = False
+# configs['labels_to_use'] = 'fev1_ratio'
+# configs['load_image_features_from_file'] = False
+
+# # testing
+# configs['load_model']=True
+# configs['skip_train']=True
+# configs['N_EPOCHS'] = 1
+# configs['prefix_model_to_load']='_'
+# configs['splits_to_use'] = 'test_with_test'
+# configs['model_to_load'] = '20190430-234233-3908'
+# configs['create_prediction_output_file'] = True
+
+#restrictive
+# configs['use_cut_restrictive'] = True
+# configs['use_lateral'] = False
+# configs['two_inputs'] = True 
+# configs['image_to_use_for_one_input_restrictive'] = 'frontal' #'frontal' or 'zoom'
+# configs['load_dataset_to_memory'] = True
+# # configs['load_image_features_from_file'] = False
+# # configs['use_precalculated_segmentation_features'] = False
+# # configs['calculate_segmentation_features'] = True
+# #configs['prevent_train_shuffle']  = True
+# # configs['BATCH_SIZE']=1
+# configs['use_random_crops'] = False
+# configs['use_horizontal_flip'] = False
+# # configs['splits_to_use'] = 'test_with_test'
+# configs['labels_to_use'] = 'restrictive'
+# # configs['chexnet_layers'] = 121
+# # configs['chexnet_architecture'] = 'densenet'
+# # configs['save_model']=True
+ 
+# configs['use_cut_restrictive'] = False
+# configs['use_lateral'] = True
+# configs['load_dataset_to_memory'] = False
+# configs['use_random_crops'] = True
+# configs['use_horizontal_flip'] = False
+# configs['load_image_features_from_file'] = False
+
 configs.open_get_block_set()
 
 logging.basicConfig( filename = 'log/log'+configs['timestamp']+'.txt', level=logging.INFO)
@@ -272,6 +326,7 @@ print('log'+configs['timestamp']+'.txt')
 labels_columns = configs['get_labels_columns']
 
 import model_loading
+import image_preprocessing
 import utils
 import metrics
 import inputs
@@ -280,9 +335,10 @@ import time
 
 logging.info('Using PyTorch ' +str(torch.__version__))
 
-NUM_WORKERS = configs['BATCH_SIZE']
+NUM_WORKERS = 0#2#configs['BATCH_SIZE']
 # faster to have one worker and use non thread safe h5py to load preprocessed images
 # than other tested options
+os.environ['CUDA_VISIBLE_DEVICES'] = args['cvd']
 
 if (not socket.gethostname() == 'rigveda') and (configs['machine_to_use'] == 'titan' or args['cvd'] is not None):
     # if args['cvd'] is None:
@@ -425,8 +481,10 @@ def run_epoch(loaders, model, criterion, optimizer, epoch=0, n_epochs=0, train=T
     lossValNorm = 0.0
     y_corr, y_pred, y_corr_all = (np.empty([0,x]) for x in (len(labels_columns),len(labels_columns),len(configs['all_output_columns'])))
     example_identifiers = np.empty([0,len(configs['example_identifier_columns'])])
+
     for i, loader_output in enumerate(loaders):
         
+
         if configs['use_transformation_loss'] and train:
             unsupervised_loader_output, supervised_loader_output = loader_output
             input1, input2, target, column_values, extra_inputs, filepath, segmentation_features, index, example_identifier = supervised_loader_output
@@ -435,6 +493,13 @@ def run_epoch(loaders, model, criterion, optimizer, epoch=0, n_epochs=0, train=T
         if train:
             optimizer.zero_grad()
         # Forward pass
+        # torchvision.utils.save_image(input1, 'batch_1_'+ configs['timestamp'] + '.png')
+        # if configs['two_inputs']:
+        #     torchvision.utils.save_image(input2, 'batch_2_'+ configs['timestamp'] + '.png')
+        # torchvision.utils.save_image(image_preprocessing.BatchUnNormalizeTensor(configs['normalization_mean'],configs['normalization_std'])(input1),  'batch_1_un_'+ configs['timestamp'] + '.png')
+        # if configs['two_inputs']:
+        #     torchvision.utils.save_image(image_preprocessing.BatchUnNormalizeTensor(configs['normalization_mean'],configs['normalization_std'])(input2),  'batch_2_un_'+ configs['timestamp'] + '.png')
+        # 1/0
         input1_var, input2_var, extra_inputs_var, target_var = ((torch.autograd.Variable(var.cuda(non_blocking=True, device = 0), volatile=(not train))
                                                if (not isinstance(var,(list,))) else None) for var in (input1, input2, extra_inputs,target)) #TEMP: replace segmentation_features with extra_inputs
         
@@ -518,7 +583,7 @@ def run_epoch(loaders, model, criterion, optimizer, epoch=0, n_epochs=0, train=T
         if configs['use_transformation_loss'] and train:
             input1_uns, input2_uns = unsupervised_loader_output
             input1_uns = input1_uns.view([input1_uns.size()[0]*input1_uns.size()[1], input1_uns.size()[2], input1_uns.size()[3], input1_uns.size()[4]])
-            if configs['use_lateral']:
+            if configs['two_inputs']:
                 input2_uns = input2_uns.view([input2_uns.size()[0]*input2_uns.size()[1], input2_uns.size()[2], input2_uns.size()[3], input2_uns.size()[4]])
             input1_var_uns, input2_var_uns, extra_inputs_var_uns = ((torch.autograd.Variable(var.cuda(non_blocking=True, device = 0), volatile=(not train))
                                                    if (not isinstance(var,(list,))) else None) for var in (input1_uns, input2_uns,   []))
@@ -578,7 +643,7 @@ def get_loader(set_of_images, cases_to_use, all_labels, transformSequence, split
 
         if verbose:
             logging.info('size ' + split + ' ' + str(i) +': '+str(np.array(cases_to_use_on_set_of_images[i]).shape[0]))
-    t_dataset = inputs.DatasetGenerator(cases_to_use_on_set_of_images, transformSequence, train = (split=='train'), segmentation_features_file = configs['local_directory'] + '/segmentation_features_'+split+'.h5')
+    t_dataset = inputs.DatasetGenerator(cases_to_use_on_set_of_images, transformSequence, train = (split=='train'), segmentation_features_file = configs['local_directory'] + '/segmentation_features_'+split+'.h5', split = split)
     if split == 'train' and not configs['prevent_train_shuffle']:
       if configs['balance_dataset_by_fvcfev1_predrug']:
           column_to_use = cases_to_use_on_set_of_images[0]['fev1fvc_predrug']
@@ -790,7 +855,7 @@ def load_training_pipeline(cases_to_use, all_images, all_labels, trainTransformS
               {'params':model.module.segmentation.parameters(), 'lr':configs['initial_lr_unet'], 'initial_lr':configs['initial_lr_unet'], 'weight_decay':configs['l2_reg_unet']},
               {'params':model.module.final_layers.parameters(), 'lr':configs['initial_lr_fc'], 'initial_lr':configs['initial_lr_fc'], 'weight_decay':configs['l2_reg_fc']},
               {'params':cnn_parameters_not_to_freeze, 'lr':configs['initial_lr_cnn'], 'initial_lr':configs['initial_lr_cnn'], 'weight_decay':configs['l2_reg_cnn']}
-              ], lr=configs['initial_lr_fc'] , weight_decay=configs['l2_reg_fc'])
+              ], lr=configs['initial_lr_fc'] , weight_decay=configs['l2_reg_fc'], amsgrad = configs['use_amsgrad'])
         elif configs['optimizer']=='nesterov':
             optimizer = optim.SGD( [
               {'params':model.module.stn.parameters(), 'lr':configs['initial_lr_location'], 'initial_lr':configs['initial_lr_location'], 'weight_decay':configs['l2_reg_location']},
@@ -805,7 +870,7 @@ def load_training_pipeline(cases_to_use, all_images, all_labels, trainTransformS
             scheduler = utils.ReduceLROnPlateau(optimizer, factor = 0.1, patience = 5, mode = 'min', verbose = True)
         '''
         if configs['scheduler_to_use'] == 'plateau':
-            scheduler = utils.ReduceLROnPlateau(optimizer, factor = 0.1, patience = configs['plateau_patience'], mode = 'min', verbose = True)
+            scheduler = utils.ReduceLROnPlateau(optimizer, factor = configs['multiplier_lr_scheduler'], patience = configs['plateau_patience'], mode = 'min', verbose = True)
         if configs['scheduler_to_use'] == 'steps':
             scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones = configs['milestones_steps'], gamma=0.1)
         if configs['scheduler_to_use'] == 'cosine':
@@ -832,9 +897,16 @@ def load_model(models, input_model_name):
         model.load_state_dict(torch.load('./models/' + input_model_name + '_' + str(i)))
 
 def train(models, criterions, optimizers, schedulers, train_loaders, test_loaders, eval_train_loaders):    # Train model
+    # h5f = h5py.File('/scratch/ricbl/pft/images_restrictive.train.2.h5', 'w')
+    # h5f.create_dataset('frontal', (len(train_loaders[0].dataset), 3, 224, 224))
+    # h5f.create_dataset('zoom', (len(train_loaders[0].dataset), 3, 224, 224))
+    # all_images = image_preprocessing.preprocess_images_and_save_with_dataset(train_loaders[0].dataset, h5f)
+    # h5f.close()
+    # 1/0
+        
     n_epochs = configs['N_EPOCHS']
     logging.info('starting training')
-
+    best_loss = 10000
     training_range = configs['get_training_range']
 
     #train_dataset_size, test_dataset_size  = (np.sum([len(x[0]) for x in k[0]]) for k in (eval_train_loaders, test_loaders))
@@ -926,9 +998,6 @@ def train(models, criterions, optimizers, schedulers, train_loaders, test_loader
               (concatenate_funcation(x,y) for x,y in \
                 ((ys_corr_test,y_corr_test),(ys_pred_test,y_pred_test), (ys_corr_all_test,y_corr_all_test)))
             example_identifiers_tests = concatenate_funcation(example_identifiers_tests, example_identifiers_test)
-            if configs['use_lr_scheduler']:
-                if epoch >=configs['first_epoch_scheduler_step']:
-                    schedulers[i].step(loss)
 
             all_val_losses = np.concatenate((all_val_losses, loss), axis=0)
         if configs['save_model']:
@@ -941,7 +1010,20 @@ def train(models, criterions, optimizers, schedulers, train_loaders, test_loader
         if not configs['skip_train']:
             logging.info('Train loss ' + str(epoch) + '/' + str(n_epochs) + ': ' +str(np.average(all_train_losses)))
         logging.info('Val loss ' + str(epoch) + '/' + str(n_epochs) + ': '+str(np.average(all_val_losses)))
-
+        
+        if configs['use_lr_scheduler']:
+            if epoch >=configs['first_epoch_scheduler_step']:
+                lr_reduced = schedulers[i].step(np.average(all_val_losses))
+            else:
+                lr_reduced = False
+            if configs['revert_model_lr_scheduler']:
+                if np.average(all_val_losses) <= best_loss:
+                    saved_model = model
+                    best_loss = np.average(all_val_losses)
+                if lr_reduced:
+                    model = saved_model
+                    print('Reverting to previous model')
+        
         if epoch==n_epochs or True:
             if configs['save_model'] and epoch==n_epochs:
                 save_model(models)

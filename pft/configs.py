@@ -223,6 +223,14 @@ configs.add_variable('unary_input_multiplier', -1)
 configs.add_variable('load_dataset_to_memory', False)
 configs.add_variable('meta_file_root', '/usr/sci/projects/DeepLearning/Tolga_Lab/Projects/Project_JoyceSchroeder/data/data_PFT/MetaData/MetaData_')
 configs.add_variable('subtract_0.7', False)
+configs.add_variable('use_smokeless_history', False)
+configs.add_variable('prevent_horizontal_flip_in_lateral', True)
+configs.add_variable('multiplier_lr_scheduler', 0.1)
+configs.add_variable('revert_model_lr_scheduler', False)
+configs.add_variable('use_amsgrad', False)
+configs.add_variable('use_cut_restrictive', False)
+configs.add_variable('two_inputs', True)
+configs.add_variable('image_to_use_for_one_input_restrictive', 'zoom')
 
 #These are the main configs to change from default
 configs.add_variable('trainable_densenet', False)
@@ -230,6 +238,7 @@ configs.add_variable('use_conv11', False)
 configs.add_variable('labels_to_use', 'only_absolute') # 'two_ratios', 'three_absolute', 'all_nine',
                                                        #'only_absolute','none', 'fev1fvc_predrug_absolute',
                                                        #'predict_diffs', 'fev1_ratio', 'fev1fvc_predrug'
+                                                       # restrictive
 configs.add_variable('use_lateral', False)
 configs.add_variable('tie_cnns_same_weights', False)
 configs.add_variable('tie_conv11_same_weights', False)
@@ -328,6 +337,7 @@ configs.add_self_referenced_variable_from_dict('get_labels_columns_pft', 'labels
                                        'two_predrug_absolute':['fev1_predrug','fvc_predrug'],
                                        'fev1fvc_predrug':['fev1fvc_predrug'],
                                        'fev1_ratio':['fev1_ratio'],
+                                       'restrictive':['fev1fvc_predrug','fvc_ratio'],
                                        'none':[]})
 
 configs.add_self_referenced_variable_from_dict('avg_pool_kernel_size', 'chexnet_architecture',
@@ -357,6 +367,7 @@ configs.add_self_referenced_variable_from_dict('pft_plot_columns', 'labels_to_us
                                        'two_predrug_absolute':[['fev1_predrug','fvc_predrug'], ['fev1fvc_predrug'], ['fev1_ratio']],
                                        'fev1fvc_predrug':[['fev1fvc_predrug']],
                                        'fev1_ratio':[['fev1_ratio']],
+                                       'restrictive': [['fev1fvc_predrug'],['fvc_ratio']],
                                        'none':[]})
 
 configs.add_variable('pre_transform_labels', PreTransformLabels(configs))
@@ -428,7 +439,7 @@ configs.add_predefined_set_of_configs('vrgan_train', { 'use_lateral': False,
                                              'use_random_crops': True,
                                              'histogram_equalization': 'global',
                                              'use_extra_inputs': False,
-                                             'individual_output_kind': 'copd':'linear',
+                                             'individual_output_kind': {'copd':'linear'},
                                              'unary_input_multiplier': 1,
                                              'remove_cases_more_one_image_per_position': False,
                                              'maximum_date_diff':30,
@@ -443,7 +454,7 @@ configs.add_predefined_set_of_configs('vrgan_eval', { 'use_lateral': False,
                                              'use_random_crops': True,
                                              'histogram_equalization': 'global',
                                              'use_extra_inputs': False,
-                                             'individual_output_kind': 'copd':'linear',
+                                             'individual_output_kind': {'copd':'linear'},
                                              'unary_input_multiplier': 1,
                                              'remove_cases_more_one_image_per_position': False,
                                              'maximum_date_diff':30,
@@ -456,6 +467,7 @@ configs.add_predefined_set_of_configs('vrgan_eval', { 'use_lateral': False,
 configs.add_self_referenced_variable_from_dict('get_available_memory', 'machine_to_use',
                                       {'dgx': 15600-550-10,
                                        'titan':11700-2978,#11700-550-10,
+                                       'atlas':23000-2000,
                                        'other':9000-2*550-600})
 def get_batch_size(self):
     if self['trainable_densenet']:

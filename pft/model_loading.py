@@ -31,6 +31,10 @@ from skimage.draw import ellipse, ellipse_perimeter, polygon, line
 import copy
 from collections import OrderedDict
 from scipy.optimize import curve_fit
+from keras.models import load_model
+from skimage import exposure
+from PIL import Image
+from skimage import morphology
 
 np.seterr(divide = "raise", over="warn", under="warn",  invalid="raise")
 
@@ -89,7 +93,7 @@ def get_model_cnn():
 
 def get_qt_inputs():
     n_inputs = 1
-    if configs['use_lateral']:
+    if configs['two_inputs']:
         n_inputs = 2
     if configs['tie_cnns_same_weights']:
         n_cnns = 1
@@ -127,10 +131,31 @@ class SegmentationNetwork(nn.Module):
     def __init__(self):
         super(SegmentationNetwork, self).__init__()
 
-        self.segmentation = self.get_pretrained_unet()
+        #self.segmentation = self.get_pretrained_unet()
+        self.segmentation = self.get_segmentation
 
         self.padding_margin = 4*8
 
+    model_name = '/home/sci/ricbl/Documents/projects/vagan/lung-segmentation-2d/trained_model.hdf5'
+    UNet = load_model(model_name)
+    def imresize(self, numpy_array, size):
+        return np.array(Image.fromarray(numpy_array).resize(size))
+    def get_segmentation(self, input_to_generator):
+        input_to_generator = -torch.tensor(exposure.equalize_hist(input_to_generator.cpu().numpy()[0,0,:,:]), dtype = torch.float).cuda().unsqueeze(0).unsqueeze(0)
+        input_to_generator = (input_to_generator - np.mean(input_to_generator.cpu().numpy()))/np.std(input_to_generator.cpu().numpy())
+        pred = self.UNet.predict(np.expand_dims(np.expand_dims(self.imresize(input_to_generator.squeeze(1).squeeze(0).cpu().numpy(), (256,256) ), 0), 3))[..., 0]
+        pred = self.imresize(pred[0,:,:], (224,224)) 
+        pr = pred > 0.5
+        pr = self.remove_small_regions(pr, 0.02 * 224*224)
+        # torchvision.utils.save_image(torch.tensor(pr).unsqueeze(0), 'testsegmentation.png')
+        # torchvision.utils.save_image(torch.tensor(input_to_generator) , 'testinput.png')
+        # 1/0
+        return torch.tensor(pr*1.0).unsqueeze(0).unsqueeze(0)
+    def remove_small_regions(self, img, size):
+        img = morphology.remove_small_objects(img, size)
+        img = morphology.remove_small_holes(img, size)
+        return img
+        
     def load_unet_model(self, model):
         model.load_state_dict(torch.load(configs['local_directory'] + '/models/'+configs['unet_model_file']))
         return model
@@ -168,7 +193,12 @@ class SegmentationNetwork(nn.Module):
             corner_s_not_found = np.isnan(corner_s[0])
             corner_s = corner  if corner_s_not_found else corner_s.astype(np.int)
             corner = corner.astype(np.int)
-            angle = np.rad2deg(corner_orientations(image_corners, np.expand_dims(corner_s, axis = 0), corner_mask))[0]
+            np.expand_dims(corner_s, axis = 0)
+            # print((image_corners).dtype)
+            # print((np.expand_dims(corner_s, axis = 0)).dtype)
+            # print((corner_mask).dtype)
+            # corner_orientations(image_corners.astype(np.double), np.expand_dims(corner_s, axis = 0), corner_mask)
+            angle = np.rad2deg(corner_orientations(image_corners.astype(np.double), np.expand_dims(corner_s, axis = 0), corner_mask))[0]
             intensity = (np.mean(image_corners[corner_s[0]-sigma*3,corner_s[1]-sigma*3:corner_s[1]+sigma*3-1])+ \
                         np.mean(image_corners[corner_s[0]-sigma*3:corner_s[0]+sigma*3-1,corner_s[1]+sigma*3]) + \
                         np.mean(image_corners[corner_s[0]+sigma*3,corner_s[1]-sigma*3+1:corner_s[1]+sigma*3]) + \
@@ -300,7 +330,10 @@ class SegmentationNetwork(nn.Module):
         watershed_void_marker[first_point_region[0],lower_corner_region[1]] = 1.0
         watershed_void = watershed(1-image_convexity_upper_void,watershed_void_marker,mask = 1-image_convexity_upper_void)
         bounding_box_upper_corner_void_occupation = float(np.sum(watershed_void))/(area_lung/2.)
-        upper_corner_void_convexity = float(np.sum(watershed_void))/float(abs(first_point_region[0]-lower_corner_region[0])*abs(first_point_region[1]-lower_corner_region[1])/2.)
+        if float(abs(first_point_region[0]-lower_corner_region[0])*abs(first_point_region[1]-lower_corner_region[1])/2.)==0:
+            upper_corner_void_convexity = 0
+        else:
+            upper_corner_void_convexity = float(np.sum(watershed_void))/float(abs(first_point_region[0]-lower_corner_region[0])*abs(first_point_region[1]-lower_corner_region[1])/2.)
         return OrderedDict({'bounding_box_upper_corner_void_occupation':bounding_box_upper_corner_void_occupation,
         'upper_corner_void_convexity':upper_corner_void_convexity,
         'temp_watershed':watershed_void})
@@ -333,26 +366,29 @@ class SegmentationNetwork(nn.Module):
         if configs['extra_histogram_equalization_for_segmentation']:
             assert(configs['initial_lr_unet']==0)
             xi_to_segment = torch.tensor(np.array([image_preprocessing.HistogramEqualization(configs['normalization_mean'], configs['normalization_std'])(image) for image in xi_to_segment.detach().cpu().numpy()])).float().cuda()
-        segmented_xi = 1-torch.sigmoid(self.segmentation(torch.mean(xi_to_segment, dim = 1, keepdim = True)))
+        #segmented_xi = 1-torch.sigmoid(self.segmentation(torch.mean(xi_to_segment, dim = 1, keepdim = True)))
+        segmented_xi = self.segmentation(torch.mean(xi_to_segment, dim = 1, keepdim = True))
         if not (configs['magnification_input']==1):
             segmented_xi = torch.nn.functional.interpolate(segmented_xi, scale_factor=configs['magnification_input'], mode = 'bilinear')
         if configs['initial_lr_unet']==0:
             segmented_xi = segmented_xi.detach()
         # torchvision.utils.save_image( segmented_xi, './test_segmentation.png')
-        # torchvision.utils.save_image( 1-torch.mean(image_preprocessing.BatchUnNormalizeTensor([0.485, 0.456, 0.406],[0.229, 0.224, 0.225])(xi), dim = 1, keepdim = True), './test_segmentation_origin.png')
+        # torchvision.utils.save_image( 1-xi_to_segment, './test_segmentation_origin.png')
         # 1/0
         features_images = None
         if configs['register_with_segmentation'] or configs['calculate_segmentation_features']:
             assert(configs['initial_lr_unet']==0)
-            segmented_xi = segmented_xi>0.5
+            #segmented_xi = segmented_xi>0.5
             labeled_images = [(label(image)) for image in segmented_xi.detach().cpu().numpy().astype(np.int)]
             ax = None
-            # fig, ax = plt.subplots(1,13,figsize=(2.24*13, 2.24))
+            fig, ax = plt.subplots(1,13,figsize=(2.24*13, 2.24))
             features_images = []
             regions_properties_images = []
             for k in range(len(labeled_images)):
                 labeled_image = labeled_images[k]
                 labeled_image[:,segmented_xi.size(3):] *= (np.amax(labeled_image)+1)
+                labeled_image = labeled_image[0,:,:]
+                
                 labeled_images[k] = labeled_image
                 regions_properties_images.append(regionprops(labeled_image))
             segmented_xis = torch.zeros_like(segmented_xi).float().cuda()
@@ -392,8 +428,8 @@ class SegmentationNetwork(nn.Module):
                     features_regions[original_lung_position_in_body[j]] = features
                 features_regions['theta'] = self.get_theta(regions_properties_image, segmented_xi.size(2), segmented_xi.size(3))
                 features_images.append(features_regions)
-            # fig.savefig('./test_corners.png')
-            # plt.close('all')
+            fig.savefig('./test_corners.png')
+            plt.close('all')
         else:
             segmented_xis = segmented_xi
         return segmented_xis, features_images
@@ -449,8 +485,11 @@ class ModelMoreInputs(nn.Module):
         self.bns = nn.ModuleList(bns)
         self.final_layers = FinalLayers(num_ftrs, self.n_inputs)
 
-    def forward(self, images1, images2, extra_fc_input, epoch ):
+    def forward(self, images1, images2, extra_fc_input, epoch):
         all_outputs = []
+        # torchvision.utils.save_image(images1, 'textx1.png')
+        # torchvision.utils.save_image(images2, 'textx2.png')
+        print(self.n_inputs)
         imageList = [images1, images2]
         for i in range(self.n_inputs):
             if configs['tie_cnns_same_weights']:
@@ -464,10 +503,12 @@ class ModelMoreInputs(nn.Module):
             if (configs['use_unet_segmentation'] or configs['register_with_segmentation'] or configs['calculate_segmentation_features']) and not configs['segmentation_in_loading']:
                 if i == 0 or configs['use_unet_segmentation_for_lateral']:
                     xi, _ = self.segmentation(xi)
+            #print(xi)
             xi = self.cnn[index](xi)
             if configs['normalize_lateral_and_frontal_with_bn']:
                 xi = self.bns[index](xi)
             all_outputs.append(xi)
+        #1/0
         x, extra_outs = self.final_layers(all_outputs, extra_fc_input, epoch)
         return x, extra_outs
 
@@ -899,7 +940,7 @@ class ModelDSNMPart(nn.Module):
         self.dsnm = nn.Sequential(nn.Linear(linear_input_features, self.n_groups*(self.n_groups-1)),MultiplyInGroups(self.n_groups))
         self.current_n_channels = self.n_groups
         if configs['use_extra_inputs']:
-            self.current_n_channels = self.current_n_channels+15
+            self.current_n_channels = self.current_n_channels+(15 if configs['use_smokeless_history'] else 10)
         self.initialized = False
         self.acumulated_x = None
 
@@ -1095,7 +1136,7 @@ class ModelFCPart(nn.Module):
         self.fc_before_extra_inputs = torch.nn.Sequential()
         self.fc_after_extra_inputs = torch.nn.Sequential()
 
-        extra_input_size = 15 #TEMP replace 15 with 42 if the extrainput is the segmentation features
+        extra_input_size = (15 if configs['use_smokeless_history'] else 10) #TEMP replace 15 with 42 if the extrainput is the segmentation features
         if configs['extra_fc_layers_for_extra_input']:
             self.extra_fc_layers_for_extra_input = nn.Sequential(
                         nn.BatchNorm1d(extra_input_size),
@@ -1229,7 +1270,7 @@ class ModelInternalClassSelection(nn.Module):
         self.fc_11.apply(weights_init)
 
         if configs['use_extra_inputs']:
-                self.current_n_channels = self.current_n_channels+15
+                self.current_n_channels = self.current_n_channels+(15 if configs['use_smokeless_history'] else 10)
 
         #TODO: do random fixed dropout of each input feature of the non-softmax branch
         #torch.randint_like()
